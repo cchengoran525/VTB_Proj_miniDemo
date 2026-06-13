@@ -6,9 +6,10 @@ from typing import Dict, Optional
 import cv2
 import mediapipe as mp
 import numpy as np
+from mediapipe.tasks.python import BaseOptions
+from mediapipe.tasks.python.vision import FaceLandmarker, FaceLandmarkerOptions, RunningMode
 
 import config
-
 
 LEFT_EYE_LEFT = 33
 LEFT_EYE_RIGHT = 133
@@ -85,19 +86,23 @@ class FaceTracker:
         if not self.cap.isOpened():
             raise RuntimeError(f"Cannot open camera index {camera_index}")
 
-        self.face_mesh = mp.solutions.face_mesh.FaceMesh(
-            max_num_faces=1,
-            refine_landmarks=True,
-            min_detection_confidence=0.5,
+        base_options = BaseOptions(model_asset_path=str(config.FACE_LANDMARKER_MODEL))
+        options = FaceLandmarkerOptions(
+            base_options=base_options,
+            running_mode=RunningMode.IMAGE,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+            min_face_presence_confidence=0.5,
             min_tracking_confidence=0.5,
         )
+        self.face_landmarker = FaceLandmarker.create_from_options(options)
 
-        process_noise = config.KALMAN_PROCESS_NOISE
+        base_process_noise = config.KALMAN_PROCESS_NOISE
         measurement_noise = config.KALMAN_MEASUREMENT_NOISE
-        self.filters: Dict[str, Kalman1D] = {
-            key: Kalman1D(process_noise, measurement_noise)
-            for key in ("pitch", "yaw", "roll", "mouth", "left_eye", "right_eye")
-        }
+        self.filters: Dict[str, Kalman1D] = {}
+        for key in ("pitch", "yaw", "roll", "mouth", "left_eye", "right_eye"):
+            pn = base_process_noise * config.KALMAN_RESPONSIVENESS.get(key, 1.0)
+            self.filters[key] = Kalman1D(pn, measurement_noise)
         self.last_state = TrackingState(
             pitch=0.0,
             yaw=0.0,
@@ -108,9 +113,17 @@ class FaceTracker:
             face_found=False,
         )
 
+        # 用第一帧来"热身"模型，避免首帧卡顿
+        ok, frame = self.cap.read()
+        if ok:
+            frame = cv2.flip(frame, 1)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            self.face_landmarker.detect(mp_image)
+
     def close(self) -> None:
         self.cap.release()
-        self.face_mesh.close()
+        self.face_landmarker.close()
 
     def read_state(self) -> TrackingState:
         ok, frame = self.cap.read()
@@ -119,8 +132,10 @@ class FaceTracker:
 
         frame = cv2.flip(frame, 1)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        result = self.face_mesh.process(rgb)
-        if not result.multi_face_landmarks:
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        result = self.face_landmarker.detect(mp_image)
+
+        if not result.face_landmarks:
             return TrackingState(
                 pitch=self.last_state.pitch,
                 yaw=self.last_state.yaw,
@@ -131,8 +146,9 @@ class FaceTracker:
                 face_found=False,
             )
 
-        lm = result.multi_face_landmarks[0].landmark
-        coords = np.array([(point.x, point.y, point.z) for point in lm], dtype=np.float32)
+        # face_landmarks[0] 直接是 NormalizedLandmark 列表
+        landmarks = result.face_landmarks[0]
+        coords = np.array([(pt.x, pt.y, pt.z) for pt in landmarks], dtype=np.float32)
 
         left_eye_raw = self._eye_ratio(coords, LEFT_EYE_TOP, LEFT_EYE_BOTTOM, LEFT_EYE_LEFT, LEFT_EYE_RIGHT)
         right_eye_raw = self._eye_ratio(coords, RIGHT_EYE_TOP, RIGHT_EYE_BOTTOM, RIGHT_EYE_LEFT, RIGHT_EYE_RIGHT)

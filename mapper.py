@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Union
@@ -49,26 +50,75 @@ class StateMapper:
         if not self.state_frames:
             raise RuntimeError(f"No base frames found in {self.frame_dir}")
 
+        # Hysteresis state for eye and mouth (Schmitt trigger)
+        self._last_eye = "open"
+        self._last_mouth = "closed"
+
+        # Head direction debounce state
+        self._last_head = "center"
+        self._head_locked_until = 0.0
+
     def classify(self, tracking_state: TrackingState) -> DiscreteState:
-        mouth = "open" if tracking_state.mouth_open >= config.MOUTH_OPEN_THRESHOLD else "closed"
+        # --- mouth: 2-state Schmitt trigger ---
+        mouth = self._classify_mouth(tracking_state.mouth_open)
 
+        # --- eye: 3-state Schmitt trigger ---
         eye_openness = (tracking_state.left_eye_open + tracking_state.right_eye_open) / 2.0
-        if eye_openness >= config.EYE_OPEN_THRESHOLD:
-            eye = "open"
-        elif eye_openness >= config.EYE_HALF_THRESHOLD:
-            eye = "half"
-        else:
-            eye = "closed"
+        eye = self._classify_eye(eye_openness)
 
-        head = "center"
+        # --- raw head classification (before debounce) ---
+        raw_head = "center"
         abs_yaw = abs(tracking_state.yaw)
         abs_pitch = abs(tracking_state.pitch)
         if abs_yaw >= config.HEAD_YAW_THRESHOLD and abs_yaw >= abs_pitch:
-            head = "left" if tracking_state.yaw > 0 else "right"
+            raw_head = "right" if tracking_state.yaw > 0 else "left"
         elif abs_pitch >= config.HEAD_PITCH_THRESHOLD:
-            head = "down" if tracking_state.pitch > 0 else "up"
+            raw_head = "down" if tracking_state.pitch > 0 else "up"
+
+        # --- debounce: lock non-center head direction to eliminate jitter ---
+        now = time.time()
+        if raw_head != self._last_head and now >= self._head_locked_until:
+            self._last_head = raw_head
+            if raw_head != "center":
+                self._head_locked_until = now + config.HEAD_LOCK_DURATION
+
+        head = self._last_head
 
         return DiscreteState(mouth=mouth, eye=eye, head=head)
+
+    def _classify_mouth(self, mouth_open: float) -> str:
+        """2-state Schmitt trigger: prevents jitter around MOUTH_OPEN_THRESHOLD."""
+        h = config.MOUTH_HYSTERESIS  # 阈值需要跨越的余量
+        t = config.MOUTH_OPEN_THRESHOLD
+
+        if self._last_mouth == "open":
+            if mouth_open < t - h:
+                self._last_mouth = "closed"
+        else:  # closed
+            if mouth_open > t + h:
+                self._last_mouth = "open"
+
+        return self._last_mouth
+
+    def _classify_eye(self, eye_openness: float) -> str:
+        """3-state Schmitt trigger: prevents jitter around both eye thresholds."""
+        h = config.EYE_HYSTERESIS
+        t_open = config.EYE_OPEN_THRESHOLD
+        t_half = config.EYE_HALF_THRESHOLD
+
+        if self._last_eye == "open":
+            if eye_openness < t_open - h:
+                self._last_eye = "half" if eye_openness >= t_half else "closed"
+        elif self._last_eye == "closed":
+            if eye_openness > t_half + h:
+                self._last_eye = "half" if eye_openness < t_open else "open"
+        else:  # half
+            if eye_openness > t_open + h:
+                self._last_eye = "open"
+            elif eye_openness < t_half - h:
+                self._last_eye = "closed"
+
+        return self._last_eye
 
     def resolve_frame(self, discrete_state: DiscreteState) -> tuple[str, Path]:
         if discrete_state.key in self.state_frames:
