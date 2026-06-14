@@ -22,6 +22,7 @@ from mediapipe.tasks.python import BaseOptions
 from mediapipe.tasks.python.vision import FaceLandmarker, FaceLandmarkerOptions, RunningMode
 
 sys.path.insert(0, os.path.dirname(__file__))
+from audio_capture import AudioCapture
 import config
 from mapper import StateMapper
 from simulator import EyeSimulator, MouthSimulator
@@ -95,6 +96,7 @@ def main() -> None:
     )
     fl = FaceLandmarker.create_from_options(opts)
     mapper = StateMapper()
+    audio = AudioCapture()
     eye_sim = EyeSimulator()
     mouth_sim = MouthSimulator()
 
@@ -245,9 +247,9 @@ def main() -> None:
             if sim_active:
                 # Simulated eye / mouth
                 eye_sim_state = eye_sim.update(1.0 / 30.0)
-                mouth_sim_state = mouth_sim.update(1.0 / 30.0)
+                mouth_sim_state = mouth_sim.update(1.0 / 30.0, audio.amplitude)
                 eye_avg = {"open": 0.95, "half": 0.55, "closed": 0.15}[eye_sim_state]
-                mouth_n = 0.8 if mouth_sim_state == "open" else 0.05
+                mouth_n = {"closed": 0.05, "half": 0.30, "open": 0.80}[mouth_sim_state]
                 mode_str = "[SIM]"
             else:
                 # Camera-based eye / mouth
@@ -258,7 +260,11 @@ def main() -> None:
                 mode_str = "[CAM]"
 
             # Discrete classification
-            mouth_label = "OPEN " if mouth_n >= config.MOUTH_OPEN_THRESHOLD else "closed"
+            mouth_label = (
+                "OPEN " if mouth_n >= config.MOUTH_OPEN_THRESHOLD
+                else "half " if mouth_n >= config.MOUTH_HALF_THRESHOLD
+                else "closed"
+            )
             eye_avg_use = (le_n + re_n) / 2.0 if not sim_active else eye_avg
             if eye_avg_use >= config.EYE_OPEN_THRESHOLD:
                 eye_label = "OPEN "
@@ -274,8 +280,11 @@ def main() -> None:
                 yi = max(-r, min(r, yi))
                 pi = int(round(pitch / config.HEAD_GRID_PITCH_STEP))
                 pi = max(-r, min(r, pi))
-                ri = int(round(roll / config.HEAD_GRID_ROLL_STEP))
-                ri = max(-1, min(1, ri))
+                if config.HEAD_ROLL_INNER_ONLY and (abs(yi) > 1 or abs(pi) > 1):
+                    ri = 0
+                else:
+                    ri = int(round(roll / config.HEAD_GRID_ROLL_STEP))
+                    ri = max(-1, min(1, ri))
                 parts = []
                 if yi > 0: parts.append(f'R{yi}')
                 elif yi < 0: parts.append(f'L{-yi}')
@@ -295,12 +304,13 @@ def main() -> None:
             print(
                 f"[{frame_idx:04d}] {mode_str} c={confidence:.2f} "
                 f"(rot={rot_conf:.2f} ar={ar_conf:.2f} ew={eye_conf:.2f}) "
+                f"mic={audio.amplitude:.3f} "
                 f"yaw{yaw_bar} {yaw_deg:+5.1f}°  "
                 f"pitch{pitch_bar} {pitch_deg:+5.1f}°  "
                 f"roll={roll_deg:+5.1f}°  |  "
                 f"mouth={mouth_label}({mouth_n:.2f})  "
                 f"eye={eye_label}({eye_avg_use:.2f})  |  "
-                f"→ {mouth_label.strip()}_{eye_label.strip()}_{head_label}"
+                f"→ {mouth_label.strip()}_{eye_label.strip()}_{head_label.strip()}"
             )
 
             frame_idx += 1
@@ -310,6 +320,7 @@ def main() -> None:
     finally:
         cap.release()
         fl.close()
+        audio.close()
 
 
 if __name__ == "__main__":

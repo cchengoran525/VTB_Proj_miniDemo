@@ -102,44 +102,90 @@ class EyeSimulator:
 
 
 # ---------------------------------------------------------------------------
-#  Mouth simulator (placeholder – audio hook goes here later)
+#  Mouth simulator — audio‑driven  (falls back to random when no audio)
 # ---------------------------------------------------------------------------
 
 @dataclass
 class MouthSimulator:
-    """Simple mouth movement placeholder.
+    """Audio‑driven mouth movement — 3 states with hysteresis.
 
-    TODO: replace ``_should_move`` with audio‑amplitude‑based trigger.
+    Pass ``audio_amplitude`` (0‑1) to ``update()``.  Falls back to random
+    idle movement when amplitude is ``None``.
     """
 
-    open_duration_frames: tuple[int, int] = (5, 15)
-    closed_duration_frames: tuple[int, int] = (30, 90)
-    move_chance: float = 0.03  # per-frame probability of starting a mouth cycle
+    # Amplitude thresholds (0‑1 RMS)
+    half_threshold: float = 0.015      # above → talking (half)
+    open_threshold: float = 0.040      # above → wide open
+    close_threshold: float = 0.008     # below → fully closed
+    hold_frames: int = 3               # minimum frames to hold after change
 
     _state: str = "closed"
-    _remaining: int = 0
+    _hold: int = 0
 
-    def update(self, dt: float) -> str:
-        """Advance one frame and return "open" or "closed"."""
-        if self._remaining > 0:
-            self._remaining -= 1
-            if self._remaining <= 0:
-                if self._state == "open":
-                    self._state = "closed"
-                    self._remaining = random.randint(*self.closed_duration_frames)
-                else:
-                    self._state = "open"
-                    self._remaining = random.randint(*self.open_duration_frames)
+    def update(self, dt: float, audio_amplitude: float | None = None) -> str:
+        """Advance one frame and return ``"closed"``, ``"half"``, or ``"open"``."""
+        if audio_amplitude is not None:
+            return self._update_audio(audio_amplitude)
+        return self._update_random(dt)
+
+    # ---- audio-driven ---------------------------------------------------
+
+    def _update_audio(self, amp: float) -> str:
+        if self._hold > 0:
+            self._hold -= 1
             return self._state
 
-        # Idle (closed) — randomly decide to open
-        if random.random() < self.move_chance:
+        if self._state == "closed":
+            if amp >= self.open_threshold:
+                self._state = "open"
+                self._hold = self.hold_frames
+            elif amp >= self.half_threshold:
+                self._state = "half"
+                self._hold = self.hold_frames
+        elif self._state == "half":
+            if amp >= self.open_threshold:
+                self._state = "open"
+                self._hold = self.hold_frames
+            elif amp < self.close_threshold:
+                self._state = "closed"
+                self._hold = self.hold_frames
+        else:  # open
+            if amp < self.close_threshold:
+                self._state = "closed"
+                self._hold = self.hold_frames
+            elif amp < self.half_threshold:
+                self._state = "half"
+                self._hold = self.hold_frames
+        return self._state
+
+    # ---- random (fallback / placeholder) ---------------------------------
+
+    _random_open_chance: float = 0.03
+    _random_open_frames: tuple[int, int] = (5, 15)
+    _random_closed_frames: tuple[int, int] = (30, 90)
+    _random_remaining: int = 0
+
+    def _update_random(self, dt: float) -> str:
+        if self._random_remaining > 0:
+            self._random_remaining -= 1
+            if self._random_remaining <= 0:
+                self._state = (
+                    "closed" if self._state == "open" else "open"
+                )
+                self._random_remaining = random.randint(
+                    *(
+                        self._random_closed_frames
+                        if self._state == "closed"
+                        else self._random_open_frames
+                    )
+                )
+            return self._state
+        if random.random() < self._random_open_chance:
             self._state = "open"
-            self._remaining = random.randint(*self.open_duration_frames)
-            return self._state
-
+            self._random_remaining = random.randint(*self._random_open_frames)
         return self._state
 
     def reset(self) -> None:
         self._state = "closed"
-        self._remaining = 0
+        self._hold = 0
+        self._random_remaining = 0

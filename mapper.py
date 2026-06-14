@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Union
 
@@ -11,6 +12,7 @@ from tracker import TrackingState
 
 MOUTH_PRIORITY_WEIGHT = 100
 EYE_PRIORITY_WEIGHT = 10
+VARIANT_PRIORITY = 1  # small penalty for variant mismatch
 
 
 @dataclass(frozen=True)
@@ -18,10 +20,14 @@ class DiscreteState:
     mouth: str
     eye: str
     head: str
+    variant: int = 0  # 0 = no variant, 1‑N = micro‑variation slot
 
     @property
     def key(self) -> str:
-        return f"{self.mouth}_{self.eye}_{self.head}"
+        base = f"{self.mouth}_{self.eye}_{self.head}"
+        if self.variant > 0:
+            return f"{base}_v{self.variant}"
+        return base
 
 
 class StateMapper:
@@ -43,7 +49,7 @@ class StateMapper:
                 continue
 
             parts = stem.split("_")
-            if len(parts) != 3:
+            if len(parts) < 3:            # need at least mouth_eye_head
                 continue
             self.state_frames[stem] = path
 
@@ -57,6 +63,10 @@ class StateMapper:
         # Head direction debounce state
         self._last_head = "center"
         self._head_locked_until = 0.0
+
+        # Variant assignment — one randomly‑picked variant per head‑pose visit
+        self._head_variant: Dict[str, int] = {}
+        self._last_variant_head: str = "center"
 
     def classify(self, tracking_state: TrackingState) -> DiscreteState:
         # --- mouth: 2-state Schmitt trigger ---
@@ -72,7 +82,21 @@ class StateMapper:
         else:
             head = self._classify_head_5way(tracking_state.yaw, tracking_state.pitch)
 
-        return DiscreteState(mouth=mouth, eye=eye, head=head)
+        # --- variant assignment ---
+        # Re‑roll variant each time the (debounced) head key changes.
+        # Within the same head visit the variant is locked so eye / mouth
+        # changes stay under the same micro‑variation.
+        if head != self._last_variant_head:
+            if self._last_variant_head in self._head_variant:
+                del self._head_variant[self._last_variant_head]
+            self._last_variant_head = head
+
+        variant = self._head_variant.get(head, 0)
+        if variant == 0 and config.HEAD_VARIANTS_PER_KEY > 1:
+            variant = random.randint(1, config.HEAD_VARIANTS_PER_KEY)
+            self._head_variant[head] = variant
+
+        return DiscreteState(mouth=mouth, eye=eye, head=head, variant=variant)
 
     # ------------------------------------------------------------------
     #  Head: legacy 5-direction
@@ -109,9 +133,12 @@ class StateMapper:
         # Pitch
         pi = int(round(pitch / config.HEAD_GRID_PITCH_STEP))
         pi = max(-r, min(r, pi))
-        # Roll — always 3 levels (WL / — / WR)
-        ri = int(round(roll / config.HEAD_GRID_ROLL_STEP))
-        ri = max(-1, min(1, ri))
+        # Roll — only on inner 3×3 (or everywhere if disabled)
+        if config.HEAD_ROLL_INNER_ONLY and (abs(yi) > 1 or abs(pi) > 1):
+            ri = 0
+        else:
+            ri = int(round(roll / config.HEAD_GRID_ROLL_STEP))
+            ri = max(-1, min(1, ri))
 
         parts: list[str] = []
         if yi > 0:
@@ -138,16 +165,22 @@ class StateMapper:
         return self._last_head
 
     def _classify_mouth(self, mouth_open: float) -> str:
-        """2-state Schmitt trigger: prevents jitter around MOUTH_OPEN_THRESHOLD."""
-        h = config.MOUTH_HYSTERESIS  # 阈值需要跨越的余量
-        t = config.MOUTH_OPEN_THRESHOLD
+        """3-state Schmitt trigger: closed / half (talking) / open (wide)."""
+        h = config.MOUTH_HYSTERESIS
+        t_half = config.MOUTH_HALF_THRESHOLD   # closed → half boundary
+        t_open = config.MOUTH_OPEN_THRESHOLD   # half → open boundary
 
-        if self._last_mouth == "open":
-            if mouth_open < t - h:
-                self._last_mouth = "closed"
-        else:  # closed
-            if mouth_open > t + h:
+        if self._last_mouth == "closed":
+            if mouth_open > t_half + h:
+                self._last_mouth = "half" if mouth_open < t_open else "open"
+        elif self._last_mouth == "half":
+            if mouth_open > t_open + h:
                 self._last_mouth = "open"
+            elif mouth_open < t_half - h:
+                self._last_mouth = "closed"
+        else:  # open
+            if mouth_open < t_open - h:
+                self._last_mouth = "half" if mouth_open >= t_half else "closed"
 
         return self._last_mouth
 
@@ -194,16 +227,20 @@ class StateMapper:
 
     @staticmethod
     def _state_from_key(key: str) -> DiscreteState:
-        # Keys are "mouth_eye_head" — head may contain underscores for grid
-        # coords (e.g. "open_open_L2_D1"). Split carefully.
+        # Parse variant suffix first: "…_v3" → variant=3
+        variant = 0
         parts = key.split("_")
+        if parts[-1].startswith("v") and parts[-1][1:].isdigit():
+            variant = int(parts[-1][1:])
+            parts = parts[:-1]
+        # Remaining parts: mouth_eye_head…
         if len(parts) == 3:
             mouth, eye, head = parts
         elif len(parts) == 4:
             mouth, eye, head = parts[0], parts[1], f"{parts[2]}_{parts[3]}"
         else:
             mouth, eye, head = parts[0], parts[1], "_".join(parts[2:])
-        return DiscreteState(mouth=mouth, eye=eye, head=head)
+        return DiscreteState(mouth=mouth, eye=eye, head=head, variant=variant)
 
     @staticmethod
     def _distance(source: DiscreteState, target: DiscreteState) -> int:
@@ -213,6 +250,8 @@ class StateMapper:
         if source.eye != target.eye:
             distance += EYE_PRIORITY_WEIGHT
         distance += StateMapper._head_distance(source.head, target.head)
+        if source.variant != target.variant and source.variant > 0 and target.variant > 0:
+            distance += VARIANT_PRIORITY
         return distance
 
     @staticmethod
