@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import random
 import time
 from dataclasses import dataclass, field
@@ -127,17 +128,17 @@ class StateMapper:
     def _classify_head_grid(self, yaw: float, pitch: float, roll: float = 0.0) -> str:
         r = config.HEAD_GRID_RADIUS
 
-        # Yaw
-        yi = int(round(yaw / config.HEAD_GRID_YAW_STEP))
+        # Yaw  — trunc: 0~25°→0  25~50°→±1  50°+→±2
+        yi = math.trunc(yaw / config.HEAD_GRID_YAW_STEP)
         yi = max(-r, min(r, yi))
-        # Pitch
-        pi = int(round(pitch / config.HEAD_GRID_PITCH_STEP))
+        # Pitch — trunc: 0~10°→0  10~20°→±1  20°+→±2
+        pi = math.trunc(pitch / config.HEAD_GRID_PITCH_STEP)
         pi = max(-r, min(r, pi))
         # Roll — only on inner 3×3 (or everywhere if disabled)
         if config.HEAD_ROLL_INNER_ONLY and (abs(yi) > 1 or abs(pi) > 1):
             ri = 0
         else:
-            ri = int(round(roll / config.HEAD_GRID_ROLL_STEP))
+            ri = math.trunc(roll / config.HEAD_GRID_ROLL_STEP)
             ri = max(-1, min(1, ri))
 
         parts: list[str] = []

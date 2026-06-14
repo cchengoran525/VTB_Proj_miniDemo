@@ -309,14 +309,14 @@ def main() -> None:
             # Head direction (grid or legacy, no debounce in debug mode)
             if config.HEAD_GRID_ENABLED:
                 r = config.HEAD_GRID_RADIUS
-                yi = int(round(yaw / config.HEAD_GRID_YAW_STEP))
+                yi = math.trunc(yaw / config.HEAD_GRID_YAW_STEP)
                 yi = max(-r, min(r, yi))
-                pi = int(round(pitch / config.HEAD_GRID_PITCH_STEP))
+                pi = math.trunc(pitch / config.HEAD_GRID_PITCH_STEP)
                 pi = max(-r, min(r, pi))
                 if config.HEAD_ROLL_INNER_ONLY and (abs(yi) > 1 or abs(pi) > 1):
                     ri = 0
                 else:
-                    ri = int(round(roll / config.HEAD_GRID_ROLL_STEP))
+                    ri = math.trunc(roll / config.HEAD_GRID_ROLL_STEP)
                     ri = max(-1, min(1, ri))
                 parts = []
                 if yi > 0: parts.append(f'R{yi}')
