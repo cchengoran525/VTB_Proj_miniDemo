@@ -126,6 +126,10 @@ class FaceTracker:
             "pitch": [], "yaw": [], "roll": [],
         }
 
+        # Rolling history for occlusion detection (mouth / eye geometry)
+        self._mouth_geo_history: List[float] = []
+        self._eye_geo_history: List[float] = []
+
         # 用第一帧来"热身"模型，避免首帧卡顿
         ok, frame = self.cap.read()
         if ok:
@@ -191,7 +195,8 @@ class FaceTracker:
         right_eye_raw = self._eye_ratio(coords, RIGHT_EYE_TOP, RIGHT_EYE_BOTTOM, RIGHT_EYE_LEFT, RIGHT_EYE_RIGHT)
         mouth_raw = self._mouth_ratio(coords)
 
-        # Face confidence: blend of rotation, geometry, and direct eye quality.
+        # Face confidence: 4‑signal blend — rotation, geometry, eye quality,
+        # and mouth‑geometry anomaly detection (catches hand‑over‑mouth etc.).
         #
         # (1) Rotation confidence — drops as head turns from calibrated neutral.
         rot_conf = max(0.0, 1.0 - math.hypot(pitch, yaw) / 0.52)
@@ -205,7 +210,6 @@ class FaceTracker:
         ar_conf = float(np.clip((ar - 0.30) / 0.50, 0.0, 1.0))
         #
         # (3) Eye-width symmetry — frontal: left eye ≈ right eye in 2D.
-        #     Side: far eye's 2D projection is much narrower.
         left_eye_w = float(np.linalg.norm(
             coords[LEFT_EYE_LEFT, :2] - coords[LEFT_EYE_RIGHT, :2]
         ))
@@ -214,10 +218,29 @@ class FaceTracker:
         ))
         ew_min = min(left_eye_w, right_eye_w)
         ew_max = max(left_eye_w, right_eye_w)
-        eye_width_sym = ew_min / (ew_max + 1e-6)       # 1.0 = symmetric, →0 = occluded
+        eye_width_sym = ew_min / (ew_max + 1e-6)
         eye_conf = float(np.clip((eye_width_sym - 0.45) / 0.50, 0.0, 1.0))
+        #
+        # (4) Mouth-geometry anomaly — sudden width change → occlusion.
+        mouth_w_2d = float(np.linalg.norm(
+            coords[MOUTH_LEFT, :2] - coords[MOUTH_RIGHT, :2]
+        ))
+        mouth_geo_ratio = mouth_w_2d / (face_w + 1e-6)
+        mouth_geo_conf = self._anomaly_conf(
+            self._mouth_geo_history, mouth_geo_ratio
+        )
 
-        confidence = 0.35 * rot_conf + 0.35 * ar_conf + 0.3 * eye_conf
+        # (5) Eye-geometry anomaly — sudden width change → occlusion.
+        eye_geo_ratio = (left_eye_w + right_eye_w) / (2.0 * face_w + 1e-6)
+        eye_geo_conf = self._anomaly_conf(
+            self._eye_geo_history, eye_geo_ratio
+        )
+
+        confidence = (
+            0.20 * rot_conf + 0.20 * ar_conf
+            + 0.20 * eye_conf + 0.20 * mouth_geo_conf
+            + 0.20 * eye_geo_conf
+        )
 
         state = TrackingState(
             pitch=self.filters["pitch"].update(pitch),
@@ -296,6 +319,25 @@ class FaceTracker:
 
         # During calibration, return raw values (will drift until calibrated)
         return pitch, yaw, roll
+
+    # ----------------------------------------------------------------
+    #  Anomaly detection helper (shared by mouth / eye occlusion)
+    # ----------------------------------------------------------------
+
+    @staticmethod
+    def _anomaly_conf(history: List[float], value: float) -> float:
+        """Confidence drop when *value* deviates from rolling median (MAD)."""
+        history.append(value)
+        if len(history) > 90:
+            history.pop(0)
+        if len(history) < 15:
+            return 1.0
+        arr = np.asarray(history, dtype=np.float64)
+        median = float(np.median(arr))
+        mad = float(np.median(np.abs(arr - median))) + 1e-6
+        deviation = abs(value - median) / mad
+        # deviation ≤ 1.5 MAD → 1.0    ≥ 8 MAD → 0.0
+        return float(np.clip(1.0 - (deviation - 1.5) / 6.5, 0.0, 1.0))
 
     # ----------------------------------------------------------------
     #  Legacy heuristic head pose (fallback when matrix unavailable)

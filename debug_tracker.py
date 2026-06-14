@@ -100,6 +100,22 @@ def main() -> None:
     eye_sim = EyeSimulator()
     mouth_sim = MouthSimulator()
 
+    # Anomaly-detection history (shared with tracker.py logic)
+    _mouth_hist: list[float] = []
+    _eye_hist: list[float] = []
+
+    def _anomaly_conf(hist: list[float], value: float) -> float:
+        hist.append(value)
+        if len(hist) > 90:
+            hist.pop(0)
+        if len(hist) < 15:
+            return 1.0
+        arr = np.asarray(hist, dtype=np.float64)
+        median = float(np.median(arr))
+        mad = float(np.median(np.abs(arr - median))) + 1e-6
+        deviation = abs(value - median) / mad
+        return float(np.clip(1.0 - (deviation - 1.5) / 6.5, 0.0, 1.0))
+
     # Calibration
     pitch_offset = yaw_offset = roll_offset = 0.0
     calib_samples: list[float] = []
@@ -228,20 +244,28 @@ def main() -> None:
             pitch_bar = "".join(bar_p)
 
             # ---------- face confidence & dual-mode ----------
-            # (1) Rotation, (2) aspect-ratio, (3) eye-WIDTH symmetry
+            # (1) Rotation, (2) aspect-ratio, (3) eye-WIDTH symmetry,
+            # (4) mouth-geometry anomaly, (5) eye-geometry anomaly
             rot_conf = max(0.0, 1.0 - math.hypot(yaw, pitch) / 0.52)
             xs = coords[:, 0]; ys = coords[:, 1]
-            ar = float(np.ptp(xs)) / (float(np.ptp(ys)) + 1e-6)
+            face_w = float(np.ptp(xs)); face_h = float(np.ptp(ys))
+            ar = face_w / (face_h + 1e-6)
             ar_conf = float(np.clip((ar - 0.30) / 0.50, 0.0, 1.0))
             le_w = float(np.linalg.norm(
                 coords[LEFT_EYE_LEFT, :2] - coords[LEFT_EYE_RIGHT, :2]))
             re_w = float(np.linalg.norm(
                 coords[RIGHT_EYE_LEFT, :2] - coords[RIGHT_EYE_RIGHT, :2]))
-            ew_min = min(le_w, re_w)
-            ew_max = max(le_w, re_w)
+            ew_min = min(le_w, re_w); ew_max = max(le_w, re_w)
             eye_width_sym = ew_min / (ew_max + 1e-6)
             eye_conf = float(np.clip((eye_width_sym - 0.45) / 0.50, 0.0, 1.0))
-            confidence = 0.35 * rot_conf + 0.35 * ar_conf + 0.3 * eye_conf
+            mw = float(np.linalg.norm(
+                coords[MOUTH_LEFT, :2] - coords[MOUTH_RIGHT, :2]))
+            mouth_geo_conf = _anomaly_conf(_mouth_hist, mw / (face_w + 1e-6))
+            eye_geo_conf = _anomaly_conf(_eye_hist, (le_w + re_w) / (2 * face_w + 1e-6))
+            confidence = (
+                0.20 * rot_conf + 0.20 * ar_conf + 0.20 * eye_conf
+                + 0.20 * mouth_geo_conf + 0.20 * eye_geo_conf
+            )
             sim_active = confidence < config.FACE_CONFIDENCE_THRESHOLD
 
             if sim_active:
@@ -303,7 +327,7 @@ def main() -> None:
 
             print(
                 f"[{frame_idx:04d}] {mode_str} c={confidence:.2f} "
-                f"(rot={rot_conf:.2f} ar={ar_conf:.2f} ew={eye_conf:.2f}) "
+                f"(r={rot_conf:.2f} a={ar_conf:.2f} e={eye_conf:.2f} m={mouth_geo_conf:.2f} ge={eye_geo_conf:.2f}) "
                 f"mic={audio.amplitude:.3f} "
                 f"yaw{yaw_bar} {yaw_deg:+5.1f}°  "
                 f"pitch{pitch_bar} {pitch_deg:+5.1f}°  "

@@ -1,0 +1,3 @@
+- [Dual-mode CAM/SIM threshold needs tuning](dual-mode-tuning.md) — SIM triggers too easily at moderate angles, boundary needs adjustment
+- [NO FACE edge cases](no-face-edge-cases.md) — distinguish deliberate face covering vs tracking loss vs user away, different behaviors per case
+- [Future features deferred past MVP](future-features.md) — hand tracking, object interaction, audio-driven mouth

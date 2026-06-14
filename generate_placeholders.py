@@ -19,6 +19,15 @@ from PIL import Image, ImageDraw, ImageFont
 MOUTHS = ["closed", "half", "open"]
 EYES = ["closed", "half", "open"]
 
+# Chinese labels for display
+MOUTH_ZH = {"closed": "闭嘴", "half": "微张", "open": "大张"}
+EYE_ZH = {"closed": "闭眼", "half": "半开", "open": "睁眼"}
+HEAD_ZH = {
+    "center": "正面", "L1": "左1", "L2": "左2", "R1": "右1", "R2": "右2",
+    "U1": "上1", "U2": "上2", "D1": "下1", "D2": "下2",
+    "WL": "左歪", "WR": "右歪",
+}
+
 # 5×5 yaw / pitch grid
 GRID_RADIUS = 2
 YAW_LABELS = {-2: "L2", -1: "L1", 0: "", 1: "R1", 2: "R2"}
@@ -59,40 +68,55 @@ ACCENT = {
 }
 
 
+def _head_zh(head: str) -> str:
+    """Translate compound head label like 'R1_D1_WL' to Chinese."""
+    if head in HEAD_ZH:
+        return HEAD_ZH[head]
+    parts = head.split("_")
+    return "".join(HEAD_ZH.get(p, p) for p in parts)
+
+
 def draw_frame(mouth: str, eye: str, head: str, variant: int) -> Image.Image:
     img = Image.new("RGB", SIZE, BG)
     d = ImageDraw.Draw(img)
 
-    # Colour accent based on mouth state
     accent = ACCENT.get(mouth, FG)
 
     # Top bar
     d.rectangle([(0, 0), (SIZE[0] - 1, 4)], fill=accent)
 
     # Variant badge
-    d.text((SIZE[0] - 30, 10), f"v{variant}", fill=accent)
+    d.text((SIZE[0] - 36, 10), f"v{variant}", fill=accent)
 
     try:
-        font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 14)
-        font_sm = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 11)
+        font = ImageFont.truetype(
+            "/System/Library/Fonts/PingFang.ttc", 16
+        )
+        font_sm = ImageFont.truetype(
+            "/System/Library/Fonts/PingFang.ttc", 13
+        )
     except OSError:
         font = ImageFont.load_default()
         font_sm = font
 
+    mz = MOUTH_ZH.get(mouth, mouth)
+    ez = EYE_ZH.get(eye, eye)
+    hz = _head_zh(head)
+
     # Labels
-    y = 30
+    y = 26
     for label, colour in [
-        (f"mouth: {mouth}", ACCENT[mouth]),
-        (f"eye:   {eye}", (160, 200, 160) if eye == "open" else
-                          (200, 180, 80) if eye == "half" else FG),
-        (f"head:  {head}", FG),
+        (f"嘴: {mz}", ACCENT[mouth]),
+        (f"眼: {ez}", (160, 200, 160) if eye == "open" else
+                       (200, 180, 80) if eye == "half" else FG),
+        (f"头: {hz}", FG),
     ]:
-        d.text((12, y), label, fill=colour, font=font)
-        y += 22
+        d.text((14, y), label, fill=colour, font=font)
+        y += 24
 
     # Separator
-    y += 6
-    d.line([(12, y), (SIZE[0] - 12, y)], fill=(80, 80, 90))
+    y += 4
+    d.line([(14, y), (SIZE[0] - 14, y)], fill=(80, 80, 90))
 
     # Mouth visual
     y += 10
