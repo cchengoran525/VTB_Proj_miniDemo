@@ -221,14 +221,14 @@ class FaceTracker:
         eye_width_sym = ew_min / (ew_max + 1e-6)
         eye_conf = float(np.clip((eye_width_sym - 0.45) / 0.50, 0.0, 1.0))
         #
-        # (4) Mouth-geometry anomaly — sudden width change → occlusion.
-        mouth_w_2d = float(np.linalg.norm(
-            coords[MOUTH_LEFT, :2] - coords[MOUTH_RIGHT, :2]
-        ))
-        mouth_geo_ratio = mouth_w_2d / (face_w + 1e-6)
-        mouth_geo_conf = self._anomaly_conf(
-            self._mouth_geo_history, mouth_geo_ratio
-        )
+        # (4) Mouth-geometry anomaly — extreme + abrupt mouth-ratio jump.
+        #     Normal speech:  mouth_raw ≈ 0.02‑0.20 (gradual).
+        #     Hand covering:  mouth_raw > 0.30  AND  sudden jump → occlusion.
+        is_extreme_mouth = mouth_raw > 0.30
+        mouth_geo_conf = 1.0
+        if is_extreme_mouth:
+            anom = self._anomaly_conf(self._mouth_geo_history, mouth_raw)
+            mouth_geo_conf = 0.0 if anom < 0.3 else 0.3
 
         # (5) Eye-geometry anomaly — sudden width change → occlusion.
         eye_geo_ratio = (left_eye_w + right_eye_w) / (2.0 * face_w + 1e-6)

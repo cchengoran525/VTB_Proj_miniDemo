@@ -258,9 +258,11 @@ def main() -> None:
             ew_min = min(le_w, re_w); ew_max = max(le_w, re_w)
             eye_width_sym = ew_min / (ew_max + 1e-6)
             eye_conf = float(np.clip((eye_width_sym - 0.45) / 0.50, 0.0, 1.0))
-            mw = float(np.linalg.norm(
-                coords[MOUTH_LEFT, :2] - coords[MOUTH_RIGHT, :2]))
-            mouth_geo_conf = _anomaly_conf(_mouth_hist, mw / (face_w + 1e-6))
+            is_extreme_mouth = mouth_r > 0.30
+            mouth_geo_conf = 1.0
+            if is_extreme_mouth:
+                anom = _anomaly_conf(_mouth_hist, mouth_r)
+                mouth_geo_conf = 0.0 if anom < 0.3 else 0.3
             eye_geo_conf = _anomaly_conf(_eye_hist, (le_w + re_w) / (2 * face_w + 1e-6))
             confidence = (
                 0.20 * rot_conf + 0.20 * ar_conf + 0.20 * eye_conf
@@ -332,8 +334,8 @@ def main() -> None:
                 f"yaw{yaw_bar} {yaw_deg:+5.1f}°  "
                 f"pitch{pitch_bar} {pitch_deg:+5.1f}°  "
                 f"roll={roll_deg:+5.1f}°  |  "
-                f"mouth={mouth_label}({mouth_n:.2f})  "
-                f"eye={eye_label}({eye_avg_use:.2f})  |  "
+                f"mouth={mouth_label}({mouth_n:.2f} r={mouth_r:.3f})  "
+                f"eye={eye_label}({eye_avg_use:.2f} r={le:.3f}/{re:.3f})  |  "
                 f"→ {mouth_label.strip()}_{eye_label.strip()}_{head_label.strip()}"
             )
 
