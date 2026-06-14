@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 .idea/
 models/
+frames_placeholder/
+frames_test/

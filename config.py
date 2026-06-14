@@ -2,7 +2,7 @@ from pathlib import Path
 
 
 BASE_DIR = Path(__file__).resolve().parent
-FRAME_DB_PATH = BASE_DIR / "frames"
+FRAME_DB_PATH = BASE_DIR / "frames_placeholder"  # 改为 "frames" 使用旧版素材
 FACE_LANDMARKER_MODEL = BASE_DIR / "models" / "face_landmarker.task"
 
 CAMERA_INDEX = 0
