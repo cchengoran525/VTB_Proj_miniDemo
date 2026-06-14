@@ -258,16 +258,23 @@ def main() -> None:
             ew_min = min(le_w, re_w); ew_max = max(le_w, re_w)
             eye_width_sym = ew_min / (ew_max + 1e-6)
             eye_conf = float(np.clip((eye_width_sym - 0.45) / 0.50, 0.0, 1.0))
-            is_extreme_mouth = mouth_r > 0.30
-            mouth_geo_conf = 1.0
-            if is_extreme_mouth:
-                anom = _anomaly_conf(_mouth_hist, mouth_r)
-                mouth_geo_conf = 0.0 if anom < 0.3 else 0.3
-            eye_geo_conf = _anomaly_conf(_eye_hist, (le_w + re_w) / (2 * face_w + 1e-6))
-            confidence = (
-                0.20 * rot_conf + 0.20 * ar_conf + 0.20 * eye_conf
-                + 0.20 * mouth_geo_conf + 0.20 * eye_geo_conf
-            )
+            if config.OCCLUSION_DETECTION_ENABLED:
+                is_extreme_mouth = mouth_r > 0.30
+                mouth_geo_conf = 1.0
+                if is_extreme_mouth:
+                    anom = _anomaly_conf(_mouth_hist, mouth_r)
+                    mouth_geo_conf = 0.0 if anom < 0.3 else 0.3
+                eye_geo_conf = _anomaly_conf(_eye_hist, (le_w + re_w) / (2 * face_w + 1e-6))
+                confidence = (
+                    0.20 * rot_conf + 0.20 * ar_conf + 0.20 * eye_conf
+                    + 0.20 * mouth_geo_conf + 0.20 * eye_geo_conf
+                )
+            else:
+                mouth_geo_conf = 1.0
+                eye_geo_conf = 1.0
+                confidence = (
+                    0.35 * rot_conf + 0.35 * ar_conf + 0.3 * eye_conf
+                )
             sim_active = confidence < config.FACE_CONFIDENCE_THRESHOLD
 
             if sim_active:

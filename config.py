@@ -20,6 +20,7 @@ CALIBRATION_FRAMES = 45
 # Dual-mode threshold: below this confidence, eye/mouth switch from camera
 # to simulator.  0.52 rad ≈ 30° head turn → confidence = 0.
 FACE_CONFIDENCE_THRESHOLD = 0.25
+OCCLUSION_DETECTION_ENABLED = False  # hand-over-face detection (WIP)
 
 # Raw feature normalization ranges. Tune these if your camera angle differs a lot.
 MOUTH_RATIO_RANGE = (0.02, 0.20)   # narrowed: raw mouth ratio spans ~0.02-0.15
@@ -32,10 +33,10 @@ YAW_SCALE = 6.0       # 大幅增大增益让左右更明显（放大信号，�
 ROLL_SCALE = 1.0
 
 # Discrete mapping thresholds.
-MOUTH_OPEN_THRESHOLD = 0.45   # half → open  (故意大张)
-MOUTH_HALF_THRESHOLD = 0.15   # closed → half (说话微张)
-EYE_OPEN_THRESHOLD = 0.68
-EYE_HALF_THRESHOLD = 0.30
+MOUTH_OPEN_THRESHOLD = 0.55   # half → open  (夸张大张)
+MOUTH_HALF_THRESHOLD = 0.10   # closed → half (微张范围加宽)
+EYE_OPEN_THRESHOLD = 0.75     # half → open  (夸张睁眼)
+EYE_HALF_THRESHOLD = 0.25     # closed → half (半开范围加宽)
 HEAD_YAW_THRESHOLD = 0.05
 HEAD_PITCH_THRESHOLD = 0.10
 
