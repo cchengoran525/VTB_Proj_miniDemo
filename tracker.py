@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import cv2
 import mediapipe as mp
@@ -42,6 +43,7 @@ class TrackingState:
     left_eye_open: float
     right_eye_open: float
     face_found: bool
+    face_confidence: float = 0.0   # 0 = side profile, 1 = straight ahead
 
     def as_vector(self) -> np.ndarray:
         return np.array(
@@ -94,6 +96,7 @@ class FaceTracker:
             min_face_detection_confidence=0.5,
             min_face_presence_confidence=0.5,
             min_tracking_confidence=0.5,
+            output_facial_transformation_matrixes=True,
         )
         self.face_landmarker = FaceLandmarker.create_from_options(options)
 
@@ -111,7 +114,17 @@ class FaceTracker:
             left_eye_open=1.0,
             right_eye_open=1.0,
             face_found=False,
+            face_confidence=0.0,
         )
+
+        # --- calibration state ---
+        self._calibrated = False
+        self._pitch_offset = 0.0
+        self._yaw_offset = 0.0
+        self._roll_offset = 0.0
+        self._calib_samples: Dict[str, List[float]] = {
+            "pitch": [], "yaw": [], "roll": [],
+        }
 
         # 用第一帧来"热身"模型，避免首帧卡顿
         ok, frame = self.cap.read()
@@ -120,6 +133,10 @@ class FaceTracker:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             self.face_landmarker.detect(mp_image)
+
+    @property
+    def calibrated(self) -> bool:
+        return self._calibrated
 
     def close(self) -> None:
         self.cap.release()
@@ -144,21 +161,68 @@ class FaceTracker:
                 left_eye_open=self.last_state.left_eye_open,
                 right_eye_open=self.last_state.right_eye_open,
                 face_found=False,
+                face_confidence=0.0,
             )
 
         # face_landmarks[0] 直接是 NormalizedLandmark 列表
         landmarks = result.face_landmarks[0]
         coords = np.array([(pt.x, pt.y, pt.z) for pt in landmarks], dtype=np.float32)
 
+        # --- head pose: matrix-based (primary) or heuristic (fallback) ---
+        if (
+            config.HEAD_POSE_SOURCE == "matrix"
+            and result.facial_transformation_matrixes
+        ):
+            pitch_raw, yaw_raw, roll_raw = self._matrix_to_pose(
+                result.facial_transformation_matrixes[0]
+            )
+        else:
+            pitch_raw, yaw_raw, roll_raw = self._head_pose(coords)
+
+        # --- calibration: zero out neutral pose ---
+        if not self._calibrated:
+            pitch, yaw, roll = self._collect_calibration(pitch_raw, yaw_raw, roll_raw)
+        else:
+            pitch = pitch_raw - self._pitch_offset
+            yaw = yaw_raw - self._yaw_offset
+            roll = roll_raw - self._roll_offset
+
         left_eye_raw = self._eye_ratio(coords, LEFT_EYE_TOP, LEFT_EYE_BOTTOM, LEFT_EYE_LEFT, LEFT_EYE_RIGHT)
         right_eye_raw = self._eye_ratio(coords, RIGHT_EYE_TOP, RIGHT_EYE_BOTTOM, RIGHT_EYE_LEFT, RIGHT_EYE_RIGHT)
         mouth_raw = self._mouth_ratio(coords)
-        pitch_raw, yaw_raw, roll_raw = self._head_pose(coords)
+
+        # Face confidence: blend of rotation, geometry, and direct eye quality.
+        #
+        # (1) Rotation confidence — drops as head turns from calibrated neutral.
+        rot_conf = max(0.0, 1.0 - math.hypot(pitch, yaw) / 0.52)
+        #
+        # (2) Aspect-ratio confidence — face bounding-box width/height ratio.
+        xs = coords[:, 0]
+        ys = coords[:, 1]
+        face_w = float(np.ptp(xs))
+        face_h = float(np.ptp(ys))
+        ar = face_w / (face_h + 1e-6)
+        ar_conf = float(np.clip((ar - 0.30) / 0.50, 0.0, 1.0))
+        #
+        # (3) Eye-width symmetry — frontal: left eye ≈ right eye in 2D.
+        #     Side: far eye's 2D projection is much narrower.
+        left_eye_w = float(np.linalg.norm(
+            coords[LEFT_EYE_LEFT, :2] - coords[LEFT_EYE_RIGHT, :2]
+        ))
+        right_eye_w = float(np.linalg.norm(
+            coords[RIGHT_EYE_LEFT, :2] - coords[RIGHT_EYE_RIGHT, :2]
+        ))
+        ew_min = min(left_eye_w, right_eye_w)
+        ew_max = max(left_eye_w, right_eye_w)
+        eye_width_sym = ew_min / (ew_max + 1e-6)       # 1.0 = symmetric, →0 = occluded
+        eye_conf = float(np.clip((eye_width_sym - 0.45) / 0.50, 0.0, 1.0))
+
+        confidence = 0.35 * rot_conf + 0.35 * ar_conf + 0.3 * eye_conf
 
         state = TrackingState(
-            pitch=self.filters["pitch"].update(pitch_raw),
-            yaw=self.filters["yaw"].update(yaw_raw),
-            roll=self.filters["roll"].update(roll_raw),
+            pitch=self.filters["pitch"].update(pitch),
+            yaw=self.filters["yaw"].update(yaw),
+            roll=self.filters["roll"].update(roll),
             mouth_open=self.filters["mouth"].update(
                 self._normalize(mouth_raw, *config.MOUTH_RATIO_RANGE)
             ),
@@ -169,9 +233,73 @@ class FaceTracker:
                 self._normalize(right_eye_raw, *config.EYE_RATIO_RANGE)
             ),
             face_found=True,
+            face_confidence=float(confidence),
         )
         self.last_state = state
         return state
+
+    # ------------------------------------------------------------------
+    #  Matrix-based head pose (accurate, uses MediaPipe's internal model)
+    # ------------------------------------------------------------------
+
+    def _matrix_to_pose(self, matrix_data) -> tuple[float, float, float]:
+        """
+        Extract yaw / pitch / roll from the 4×4 face transformation matrix.
+
+        MediaPipe can return either a flat 16‑element list or a nested
+        4×4 structure — normalise before extracting the rotation sub‑matrix.
+        """
+        data = np.asarray(matrix_data, dtype=np.float64).squeeze()
+
+        if data.shape == (16,) or data.shape == (1, 16):
+            flat = data.flatten()
+            R = np.array(
+                [[flat[0], flat[1], flat[2]],
+                 [flat[4], flat[5], flat[6]],
+                 [flat[8], flat[9], flat[10]]],
+                dtype=np.float64,
+            )
+        elif data.shape == (4, 4):
+            R = data[:3, :3].astype(np.float64)
+        elif data.shape == (1, 4, 4):
+            R = data[0, :3, :3].astype(np.float64)
+        else:
+            raise ValueError(f"Unexpected face matrix shape: {data.shape}")
+
+        rvec, _ = cv2.Rodrigues(R)
+        rx, ry, rz = rvec.flatten()
+        return float(rx), float(ry), float(rz)
+
+    def _collect_calibration(
+        self, pitch: float, yaw: float, roll: float
+    ) -> tuple[float, float, float]:
+        """Accumulate neutral-pose samples; finalise when enough collected."""
+        self._calib_samples["pitch"].append(pitch)
+        self._calib_samples["yaw"].append(yaw)
+        self._calib_samples["roll"].append(roll)
+
+        if len(self._calib_samples["pitch"]) >= config.CALIBRATION_FRAMES:
+            self._pitch_offset = float(np.mean(self._calib_samples["pitch"]))
+            self._yaw_offset = float(np.mean(self._calib_samples["yaw"]))
+            self._roll_offset = float(np.mean(self._calib_samples["roll"]))
+            self._calibrated = True
+            print(
+                f"[Calibrated] pitch_offset={math.degrees(self._pitch_offset):.1f}°  "
+                f"yaw_offset={math.degrees(self._yaw_offset):.1f}°  "
+                f"roll_offset={math.degrees(self._roll_offset):.1f}°"
+            )
+            return (
+                pitch - self._pitch_offset,
+                yaw - self._yaw_offset,
+                roll - self._roll_offset,
+            )
+
+        # During calibration, return raw values (will drift until calibrated)
+        return pitch, yaw, roll
+
+    # ----------------------------------------------------------------
+    #  Legacy heuristic head pose (fallback when matrix unavailable)
+    # ----------------------------------------------------------------
 
     @staticmethod
     def _dist(points: np.ndarray, idx_a: int, idx_b: int) -> float:

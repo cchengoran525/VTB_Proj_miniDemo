@@ -10,8 +10,19 @@ TARGET_FPS = 30
 FULLSCREEN = True
 WINDOW_SIZE = (1280, 720)
 
+# Head pose source: "matrix" (MediaPipe built-in, accurate) or "heuristic" (legacy)
+HEAD_POSE_SOURCE = "matrix"
+
+# Calibration: face the camera directly for this many frames on startup.
+# The tracker averages your neutral pose and subtracts it automatically.
+CALIBRATION_FRAMES = 45
+
+# Dual-mode threshold: below this confidence, eye/mouth switch from camera
+# to simulator.  0.52 rad ≈ 30° head turn → confidence = 0.
+FACE_CONFIDENCE_THRESHOLD = 0.25
+
 # Raw feature normalization ranges. Tune these if your camera angle differs a lot.
-MOUTH_RATIO_RANGE = (0.02, 0.35)
+MOUTH_RATIO_RANGE = (0.02, 0.20)   # narrowed: raw mouth ratio spans ~0.02-0.15
 EYE_RATIO_RANGE = (0.10, 0.33)
 
 # Pose centering offsets. These keep a neutral face closer to "center".
@@ -29,6 +40,14 @@ HEAD_PITCH_THRESHOLD = 0.10  # 配合 PITCH_CENTER 提高，防止误触发
 
 # Head direction debounce: lock non-center direction for this many seconds.
 HEAD_LOCK_DURATION = 1.5
+
+# ---- head-direction grid ----------------------------------------------------
+HEAD_GRID_ENABLED = True
+HEAD_GRID_RADIUS = 1          # 1 = 3×3  (L1/0/R1 × U1/0/D1)
+                               # 2 = 5×5  (L2/L1/0/R1/R2 × …)
+HEAD_GRID_YAW_STEP = 0.14     # ~8° per yaw step
+HEAD_GRID_PITCH_STEP = 0.10   # ~6° per pitch step
+HEAD_GRID_ROLL_STEP = 0.07    # ~4° : WL / — / WR  (tilt left / neutral / tilt right)
 
 # Hysteresis margins for eye/mouth state transitions.
 # The signal must cross threshold ± margin to change state, preventing

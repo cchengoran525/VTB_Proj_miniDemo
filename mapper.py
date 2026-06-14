@@ -66,25 +66,76 @@ class StateMapper:
         eye_openness = (tracking_state.left_eye_open + tracking_state.right_eye_open) / 2.0
         eye = self._classify_eye(eye_openness)
 
-        # --- raw head classification (before debounce) ---
-        raw_head = "center"
-        abs_yaw = abs(tracking_state.yaw)
-        abs_pitch = abs(tracking_state.pitch)
-        if abs_yaw >= config.HEAD_YAW_THRESHOLD and abs_yaw >= abs_pitch:
-            raw_head = "right" if tracking_state.yaw > 0 else "left"
-        elif abs_pitch >= config.HEAD_PITCH_THRESHOLD:
-            raw_head = "down" if tracking_state.pitch > 0 else "up"
+        # --- head classification ---
+        if config.HEAD_GRID_ENABLED:
+            head = self._classify_head_grid(tracking_state.yaw, tracking_state.pitch, tracking_state.roll)
+        else:
+            head = self._classify_head_5way(tracking_state.yaw, tracking_state.pitch)
 
-        # --- debounce: lock non-center head direction to eliminate jitter ---
+        return DiscreteState(mouth=mouth, eye=eye, head=head)
+
+    # ------------------------------------------------------------------
+    #  Head: legacy 5-direction
+    # ------------------------------------------------------------------
+
+    def _classify_head_5way(self, yaw: float, pitch: float) -> str:
+        abs_yaw = abs(yaw)
+        abs_pitch = abs(pitch)
+
+        raw_head = "center"
+        if abs_yaw >= config.HEAD_YAW_THRESHOLD and abs_yaw >= abs_pitch:
+            raw_head = "right" if yaw > 0 else "left"
+        elif abs_pitch >= config.HEAD_PITCH_THRESHOLD:
+            raw_head = "down" if pitch > 0 else "up"
+
         now = time.time()
         if raw_head != self._last_head and now >= self._head_locked_until:
             self._last_head = raw_head
             if raw_head != "center":
                 self._head_locked_until = now + config.HEAD_LOCK_DURATION
 
-        head = self._last_head
+        return self._last_head
 
-        return DiscreteState(mouth=mouth, eye=eye, head=head)
+    # ------------------------------------------------------------------
+    #  Head: N×N grid + roll  (yaw / pitch / roll quantised)
+    # ------------------------------------------------------------------
+
+    def _classify_head_grid(self, yaw: float, pitch: float, roll: float = 0.0) -> str:
+        r = config.HEAD_GRID_RADIUS
+
+        # Yaw
+        yi = int(round(yaw / config.HEAD_GRID_YAW_STEP))
+        yi = max(-r, min(r, yi))
+        # Pitch
+        pi = int(round(pitch / config.HEAD_GRID_PITCH_STEP))
+        pi = max(-r, min(r, pi))
+        # Roll — always 3 levels (WL / — / WR)
+        ri = int(round(roll / config.HEAD_GRID_ROLL_STEP))
+        ri = max(-1, min(1, ri))
+
+        parts: list[str] = []
+        if yi > 0:
+            parts.append(f"R{yi}")
+        elif yi < 0:
+            parts.append(f"L{-yi}")
+        if pi > 0:
+            parts.append(f"D{pi}")
+        elif pi < 0:
+            parts.append(f"U{-pi}")
+        if ri > 0:
+            parts.append("WR")
+        elif ri < 0:
+            parts.append("WL")
+
+        raw_head = "_".join(parts) if parts else "center"
+
+        now = time.time()
+        if raw_head != self._last_head and now >= self._head_locked_until:
+            self._last_head = raw_head
+            if raw_head != "center":
+                self._head_locked_until = now + config.HEAD_LOCK_DURATION
+
+        return self._last_head
 
     def _classify_mouth(self, mouth_open: float) -> str:
         """2-state Schmitt trigger: prevents jitter around MOUTH_OPEN_THRESHOLD."""
@@ -143,7 +194,15 @@ class StateMapper:
 
     @staticmethod
     def _state_from_key(key: str) -> DiscreteState:
-        mouth, eye, head = key.split("_")
+        # Keys are "mouth_eye_head" — head may contain underscores for grid
+        # coords (e.g. "open_open_L2_D1"). Split carefully.
+        parts = key.split("_")
+        if len(parts) == 3:
+            mouth, eye, head = parts
+        elif len(parts) == 4:
+            mouth, eye, head = parts[0], parts[1], f"{parts[2]}_{parts[3]}"
+        else:
+            mouth, eye, head = parts[0], parts[1], "_".join(parts[2:])
         return DiscreteState(mouth=mouth, eye=eye, head=head)
 
     @staticmethod
@@ -160,10 +219,30 @@ class StateMapper:
     def _head_distance(source: str, target: str) -> int:
         if source == target:
             return 0
-        if "center" in {source, target}:
+
+        def _to_base_dir(h: str) -> str:
+            """Map any head label (legacy or grid) to its base direction."""
+            if h == "center":
+                return "center"
+            if "L" in h:
+                return "left"
+            if "R" in h:
+                return "right"
+            if "U" in h:
+                return "up"
+            if "D" in h:
+                return "down"
+            return h  # unknown, fall through
+
+        s_dir = _to_base_dir(source)
+        t_dir = _to_base_dir(target)
+
+        if s_dir == t_dir:
+            return 0
+        if "center" in {s_dir, t_dir}:
             return 1
         vertical = {"up", "down"}
         horizontal = {"left", "right"}
-        if {source, target} <= vertical or {source, target} <= horizontal:
+        if {s_dir, t_dir} <= vertical or {s_dir, t_dir} <= horizontal:
             return 2
         return 3
