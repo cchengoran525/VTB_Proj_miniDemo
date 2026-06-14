@@ -65,8 +65,10 @@ class StateMapper:
         self._last_head = "center"
         self._head_locked_until = 0.0
 
-        # Variant assignment — one randomly‑picked variant per head‑pose visit
+        # Variant assignment — one randomly‑picked variant per head‑pose visit.
+        # Consecutive repeats are forbidden per head key.
         self._head_variant: Dict[str, int] = {}
+        self._head_last_variant: Dict[str, int] = {}
         self._last_variant_head: str = "center"
 
     def classify(self, tracking_state: TrackingState) -> DiscreteState:
@@ -85,8 +87,7 @@ class StateMapper:
 
         # --- variant assignment ---
         # Re‑roll variant each time the (debounced) head key changes.
-        # Within the same head visit the variant is locked so eye / mouth
-        # changes stay under the same micro‑variation.
+        # Never repeat the same variant twice in a row for the same head.
         if head != self._last_variant_head:
             if self._last_variant_head in self._head_variant:
                 del self._head_variant[self._last_variant_head]
@@ -94,8 +95,14 @@ class StateMapper:
 
         variant = self._head_variant.get(head, 0)
         if variant == 0 and config.HEAD_VARIANTS_PER_KEY > 1:
-            variant = random.randint(1, config.HEAD_VARIANTS_PER_KEY)
+            last = self._head_last_variant.get(head, 0)
+            pool = [
+                v for v in range(1, config.HEAD_VARIANTS_PER_KEY + 1)
+                if v != last
+            ]
+            variant = random.choice(pool) if pool else 1
             self._head_variant[head] = variant
+            self._head_last_variant[head] = variant
 
         return DiscreteState(mouth=mouth, eye=eye, head=head, variant=variant)
 

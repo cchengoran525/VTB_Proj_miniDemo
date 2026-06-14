@@ -34,7 +34,7 @@ ROLL_SCALE = 1.0
 
 # Discrete mapping thresholds.
 MOUTH_OPEN_THRESHOLD = 0.80   # half → open  (夸张大张)
-MOUTH_HALF_THRESHOLD = 0.05   # closed → half (正常说话全在 half)
+MOUTH_HALF_THRESHOLD = 0.08   # closed → half (嘴唇不要误判为微张)
 EYE_OPEN_THRESHOLD = 0.82     # half → open  (夸张睁眼)
 EYE_HALF_THRESHOLD = 0.20     # closed → half (半开范围加宽)
 HEAD_YAW_THRESHOLD = 0.05
