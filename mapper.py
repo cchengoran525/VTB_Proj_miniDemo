@@ -167,16 +167,18 @@ class StateMapper:
         r = config.HEAD_GRID_RADIUS
 
         if config.HEAD_V1_MODE:
-            # ── V1: 7 directions only (L2/L1/0/R1/R2 + up/down), no roll ──
+            # ── V1: 7 directions, no roll, no diagonals ──
             yi = math.trunc(yaw / config.HEAD_GRID_YAW_STEP)
             yi = max(-r, min(r, yi))
             pi = math.trunc(pitch / config.HEAD_GRID_PITCH_STEP)
             pi = max(-r, min(r, pi))
 
-            # Take the dominant axis; if yaw is zero, show pitch
+            # Pitch only shows when yaw is near center
+            is_centered = abs(yaw) < config.HEAD_CENTER_YAW_MAX
+
             if yi != 0:
                 raw_head = f"R{yi}" if yi > 0 else f"L{-yi}"
-            elif pi != 0:
+            elif pi != 0 and is_centered:
                 raw_head = f"D{pi}" if pi > 0 else f"U{-pi}"
             else:
                 raw_head = "center"

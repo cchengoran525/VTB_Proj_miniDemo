@@ -61,9 +61,10 @@ TRANSITION_FRAMES_ENABLED = False
 # ---- head-direction grid ----------------------------------------------------
 HEAD_GRID_ENABLED = True
 HEAD_GRID_RADIUS = 2          # 2 = 5×5  (L2/L1/0/R1/R2  ×  U2/U1/0/D1/D2)
-HEAD_GRID_YAW_STEP = 0.38     # ~22° per step:  0~22°=center  22~44°=L1/R1  44°+=L2/R2
+HEAD_GRID_YAW_STEP = 0.31     # ~18° per step:  0~18°=center  18~36°=L1/R1  36°+=L2/R2
 HEAD_GRID_PITCH_STEP = 0.17   # ~10° per step:  0~10°=center  10~20°=U1/D1  20°+=U2/D2
 HEAD_GRID_ROLL_STEP = 0.10    # ~6° : WL / — / WR
+HEAD_CENTER_YAW_MAX = 0.17    # ~10° — pitch only shows within this yaw range
 HEAD_ROLL_INNER_ONLY = True   # only apply roll to inner 3×3 (extreme angles hurt)
 
 # Micro‑variations per head key (for visual freshness).

@@ -44,6 +44,7 @@ class TrackingState:
     right_eye_open: float
     face_found: bool
     face_confidence: float = 0.0   # 0 = side profile, 1 = straight ahead
+    mouth_raw: float = 0.0         # raw mouth height/width ratio (for occlusion)
 
     def as_vector(self) -> np.ndarray:
         return np.array(
@@ -181,6 +182,7 @@ class FaceTracker:
                 right_eye_open=self.last_state.right_eye_open,
                 face_found=False,
                 face_confidence=0.0,
+                mouth_raw=0.0,
             )
 
         # face_landmarks[0] 直接是 NormalizedLandmark 列表
@@ -279,6 +281,7 @@ class FaceTracker:
             ),
             face_found=True,
             face_confidence=float(confidence),
+            mouth_raw=float(mouth_raw),
         )
         self.last_state = state
         return state

@@ -30,6 +30,10 @@ def main() -> None:
     returning_until: float = 0.0
     leaving_state: str = "default"  # default | leaving | returning
 
+    # Auto hand-on-face detection (mouth_raw spike)
+    hof_counter: int = 0
+    hof_cooldown: int = 0
+
     try:
         default_state_key, default_frame_path = mapper.resolve_frame(
             mapper.classify(tracker.last_state)
@@ -88,6 +92,22 @@ def main() -> None:
 
             # ---- dual-mode: CAM vs SIM ----
             confidence = tracking_state.face_confidence
+
+            # ---- auto hand_on_face (mouth_raw spike → hand near face) ----
+            if hof_cooldown > 0:
+                hof_cooldown -= 1
+            if tracking_state.mouth_raw > 0.30:
+                hof_counter += 1
+                if hof_counter >= 5 and hof_cooldown <= 0:
+                    if mapper.theme == config.THEME_DEFAULT:
+                        mapper.theme = config.THEME_HAND_ON_FACE
+                        print("[Theme] hand_on_face (auto)")
+                        hof_cooldown = 60  # 2s cooldown
+            else:
+                hof_counter = max(0, hof_counter - 1)
+                if hof_counter <= 0 and mapper.theme == config.THEME_HAND_ON_FACE:
+                    mapper.theme = config.THEME_DEFAULT
+                    print("[Theme] default (auto)")
 
             if leaving_state in ("leaving", "returning"):
                 # Override: use SIM during leaving/returning
