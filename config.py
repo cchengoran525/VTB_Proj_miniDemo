@@ -7,8 +7,20 @@ FACE_LANDMARKER_MODEL = BASE_DIR / "models" / "face_landmarker.task"
 
 CAMERA_INDEX = 0
 TARGET_FPS = 30
-FULLSCREEN = True
+FULLSCREEN = False          # V1: 双窗口模式用窗口
 WINDOW_SIZE = (1280, 720)
+
+# ---- V1 MVP mode ------------------------------------------------------------
+# Limits head poses to the 7 stable directions; blocks roll + diagonals.
+HEAD_V1_MODE = True
+
+# Theme system (placeholder — use keyboard shortcuts for now)
+THEME_DEFAULT = "default"
+THEME_HAND_ON_FACE = "hand_on_face"
+
+# Leaving / returning timing (seconds)
+LEAVING_TIMEOUT = 2.0          # face lost > this → leaving
+RETURNING_DURATION = 2.0       # face recovered → returning state duration
 
 # Head pose source: "matrix" (MediaPipe built-in, accurate) or "heuristic" (legacy)
 HEAD_POSE_SOURCE = "matrix"

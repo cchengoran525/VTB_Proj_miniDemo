@@ -21,14 +21,20 @@ class DiscreteState:
     mouth: str
     eye: str
     head: str
-    variant: int = 0  # 0 = no variant, 1‑N = micro‑variation slot
+    variant: int = 0     # 0 = no variant, 1‑N = micro‑variation slot
+    theme: str = "default"
 
     @property
     def key(self) -> str:
         base = f"{self.mouth}_{self.eye}_{self.head}"
-        if self.variant > 0:
+        if self.variant > 0 and self.variant <= config.HEAD_VARIANTS_PER_KEY:
             return f"{base}_v{self.variant}"
         return base
+
+    @property
+    def themed_key(self) -> str:
+        """Key including theme for frame lookup in subdirectories."""
+        return f"{self.theme}/{self.key}"
 
 
 class StateMapper:
@@ -42,20 +48,33 @@ class StateMapper:
         if not self.frame_dir.exists():
             raise FileNotFoundError(f"Frame database not found: {self.frame_dir}")
 
-        for path in self.frame_dir.glob("*.png"):
-            stem = path.stem
-            if "_to_" in stem:
-                source, target = stem.split("_to_", 1)
-                self.transition_frames[(source, target)] = path
-                continue
+        # Scan root + default/ subdirectory for base frames
+        search_dirs = [self.frame_dir]
+        default_sub = self.frame_dir / "default"
+        if default_sub.is_dir():
+            search_dirs.append(default_sub)
 
-            parts = stem.split("_")
-            if len(parts) < 3:            # need at least mouth_eye_head
-                continue
-            self.state_frames[stem] = path
+        for search_dir in search_dirs:
+            for path in search_dir.glob("*.png"):
+                stem = path.stem
+                if "_to_" in stem:
+                    source, target = stem.split("_to_", 1)
+                    self.transition_frames[(source, target)] = path
+                    continue
+
+                parts = stem.split("_")
+                if len(parts) < 3:            # need at least mouth_eye_head
+                    continue
+                self.state_frames[stem] = path
 
         if not self.state_frames:
             raise RuntimeError(f"No base frames found in {self.frame_dir}")
+
+        # Theme support — frames_placeholder/{theme}/ subdirectories
+        self._theme_frame_dirs: Dict[str, Path] = {}
+        for d in sorted(self.frame_dir.glob("*")):
+            if d.is_dir():
+                self._theme_frame_dirs[d.name] = d
 
         # Hysteresis state for eye and mouth (Schmitt trigger)
         self._last_eye = "open"
@@ -65,11 +84,22 @@ class StateMapper:
         self._last_head = "center"
         self._head_locked_until = 0.0
 
+        # Theme state
+        self._theme: str = config.THEME_DEFAULT
+
         # Variant assignment — one randomly‑picked variant per head‑pose visit.
         # Consecutive repeats are forbidden per head key.
         self._head_variant: Dict[str, int] = {}
         self._head_last_variant: Dict[str, int] = {}
         self._last_variant_head: str = "center"
+
+    @property
+    def theme(self) -> str:
+        return self._theme
+
+    @theme.setter
+    def theme(self, value: str) -> None:
+        self._theme = value
 
     def classify(self, tracking_state: TrackingState) -> DiscreteState:
         # --- mouth: 2-state Schmitt trigger ---
@@ -104,7 +134,8 @@ class StateMapper:
             self._head_variant[head] = variant
             self._head_last_variant[head] = variant
 
-        return DiscreteState(mouth=mouth, eye=eye, head=head, variant=variant)
+        return DiscreteState(mouth=mouth, eye=eye, head=head,
+                             variant=variant, theme=self._theme)
 
     # ------------------------------------------------------------------
     #  Head: legacy 5-direction
@@ -135,34 +166,40 @@ class StateMapper:
     def _classify_head_grid(self, yaw: float, pitch: float, roll: float = 0.0) -> str:
         r = config.HEAD_GRID_RADIUS
 
-        # Yaw  — trunc: 0~25°→0  25~50°→±1  50°+→±2
-        yi = math.trunc(yaw / config.HEAD_GRID_YAW_STEP)
-        yi = max(-r, min(r, yi))
-        # Pitch — trunc: 0~10°→0  10~20°→±1  20°+→±2
-        pi = math.trunc(pitch / config.HEAD_GRID_PITCH_STEP)
-        pi = max(-r, min(r, pi))
-        # Roll — only on inner 3×3 (or everywhere if disabled)
-        if config.HEAD_ROLL_INNER_ONLY and (abs(yi) > 1 or abs(pi) > 1):
-            ri = 0
+        if config.HEAD_V1_MODE:
+            # ── V1: 7 directions only (L2/L1/0/R1/R2 + up/down), no roll ──
+            yi = math.trunc(yaw / config.HEAD_GRID_YAW_STEP)
+            yi = max(-r, min(r, yi))
+            pi = math.trunc(pitch / config.HEAD_GRID_PITCH_STEP)
+            pi = max(-r, min(r, pi))
+
+            # Take the dominant axis; if yaw is zero, show pitch
+            if yi != 0:
+                raw_head = f"R{yi}" if yi > 0 else f"L{-yi}"
+            elif pi != 0:
+                raw_head = f"D{pi}" if pi > 0 else f"U{-pi}"
+            else:
+                raw_head = "center"
         else:
-            ri = math.trunc(roll / config.HEAD_GRID_ROLL_STEP)
-            ri = max(-1, min(1, ri))
+            # ── Full 5×5 + roll ──
+            yi = math.trunc(yaw / config.HEAD_GRID_YAW_STEP)
+            yi = max(-r, min(r, yi))
+            pi = math.trunc(pitch / config.HEAD_GRID_PITCH_STEP)
+            pi = max(-r, min(r, pi))
+            if config.HEAD_ROLL_INNER_ONLY and (abs(yi) > 1 or abs(pi) > 1):
+                ri = 0
+            else:
+                ri = math.trunc(roll / config.HEAD_GRID_ROLL_STEP)
+                ri = max(-1, min(1, ri))
 
-        parts: list[str] = []
-        if yi > 0:
-            parts.append(f"R{yi}")
-        elif yi < 0:
-            parts.append(f"L{-yi}")
-        if pi > 0:
-            parts.append(f"D{pi}")
-        elif pi < 0:
-            parts.append(f"U{-pi}")
-        if ri > 0:
-            parts.append("WR")
-        elif ri < 0:
-            parts.append("WL")
-
-        raw_head = "_".join(parts) if parts else "center"
+            parts: list[str] = []
+            if yi > 0:  parts.append(f"R{yi}")
+            elif yi < 0: parts.append(f"L{-yi}")
+            if pi > 0:  parts.append(f"D{pi}")
+            elif pi < 0: parts.append(f"U{-pi}")
+            if ri > 0:  parts.append("WR")
+            elif ri < 0: parts.append("WL")
+            raw_head = "_".join(parts) if parts else "center"
 
         now = time.time()
         if raw_head != self._last_head and now >= self._head_locked_until:
@@ -213,6 +250,24 @@ class StateMapper:
         return self._last_eye
 
     def resolve_frame(self, discrete_state: DiscreteState) -> tuple[str, Path]:
+        theme = discrete_state.theme
+
+        # Special themes: single placeholder image
+        if theme in ("leaving", "returning"):
+            if theme in self._theme_frame_dirs:
+                p = self._theme_frame_dirs[theme] / f"{theme}.png"
+                if p.exists():
+                    return theme, p
+            # Fallback to default
+            theme = "default"
+
+        # Look up in theme subdirectory first
+        if theme in self._theme_frame_dirs:
+            theme_path = self._theme_frame_dirs[theme] / f"{discrete_state.key}.png"
+            if theme_path.exists():
+                return discrete_state.key, theme_path
+
+        # Fallback: root directory (exact match or nearest neighbour)
         if discrete_state.key in self.state_frames:
             return discrete_state.key, self.state_frames[discrete_state.key]
 

@@ -130,6 +130,10 @@ class FaceTracker:
         self._mouth_geo_history: List[float] = []
         self._eye_geo_history: List[float] = []
 
+        # Stored camera frame + landmarks for debug display
+        self._last_frame: np.ndarray | None = None
+        self._last_landmarks: np.ndarray | None = None
+
         # 用第一帧来"热身"模型，避免首帧卡顿
         ok, frame = self.cap.read()
         if ok:
@@ -142,6 +146,16 @@ class FaceTracker:
     def calibrated(self) -> bool:
         return self._calibrated
 
+    @property
+    def last_frame(self) -> np.ndarray | None:
+        """Last captured camera frame (BGR) for debug display."""
+        return self._last_frame
+
+    @property
+    def last_landmarks(self) -> np.ndarray | None:
+        """Last face landmark coordinates for debug overlay."""
+        return self._last_landmarks
+
     def close(self) -> None:
         self.cap.release()
         self.face_landmarker.close()
@@ -152,6 +166,7 @@ class FaceTracker:
             return self.last_state
 
         frame = cv2.flip(frame, 1)
+        self._last_frame = frame.copy()  # store for debug display
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         result = self.face_landmarker.detect(mp_image)
@@ -171,6 +186,7 @@ class FaceTracker:
         # face_landmarks[0] 直接是 NormalizedLandmark 列表
         landmarks = result.face_landmarks[0]
         coords = np.array([(pt.x, pt.y, pt.z) for pt in landmarks], dtype=np.float32)
+        self._last_landmarks = coords.copy()  # store for debug overlay
 
         # --- head pose: matrix-based (primary) or heuristic (fallback) ---
         if (
