@@ -8,7 +8,11 @@ import cv2
 import mediapipe as mp
 import numpy as np
 from mediapipe.tasks.python import BaseOptions
-from mediapipe.tasks.python.vision import FaceLandmarker, FaceLandmarkerOptions, RunningMode
+from mediapipe.tasks.python.vision import (
+    FaceLandmarker, FaceLandmarkerOptions,
+    HandLandmarker, HandLandmarkerOptions,
+    RunningMode,
+)
 
 import config
 
@@ -101,6 +105,19 @@ class FaceTracker:
         )
         self.face_landmarker = FaceLandmarker.create_from_options(options)
 
+        # Hand landmarker (for hand-on-face detection)
+        hand_base = BaseOptions(
+            model_asset_path=str(config.HAND_LANDMARKER_MODEL)
+        )
+        hand_options = HandLandmarkerOptions(
+            base_options=hand_base,
+            running_mode=RunningMode.IMAGE,
+            num_hands=2,
+            min_hand_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+        self.hand_landmarker = HandLandmarker.create_from_options(hand_options)
+
         base_process_noise = config.KALMAN_PROCESS_NOISE
         measurement_noise = config.KALMAN_MEASUREMENT_NOISE
         self.filters: Dict[str, Kalman1D] = {}
@@ -157,9 +174,20 @@ class FaceTracker:
         """Last face landmark coordinates for debug overlay."""
         return self._last_landmarks
 
+    @property
+    def last_hand_landmarks(self) -> list[np.ndarray]:
+        """Last hand landmark coordinates for debug overlay."""
+        return self._last_hand_landmarks
+
+    @property
+    def hand_near_face(self) -> bool:
+        """True if any hand is near the face (wrist close to nose)."""
+        return self._hand_near_face
+
     def close(self) -> None:
         self.cap.release()
         self.face_landmarker.close()
+        self.hand_landmarker.close()
 
     def read_state(self) -> TrackingState:
         ok, frame = self.cap.read()
@@ -189,6 +217,25 @@ class FaceTracker:
         landmarks = result.face_landmarks[0]
         coords = np.array([(pt.x, pt.y, pt.z) for pt in landmarks], dtype=np.float32)
         self._last_landmarks = coords.copy()  # store for debug overlay
+
+        # Hand detection
+        hand_result = self.hand_landmarker.detect(mp_image)
+        self._last_hand_landmarks: list[np.ndarray] = []
+        self._hand_near_face: bool = False
+        if hand_result.hand_landmarks:
+            for hl in hand_result.hand_landmarks:
+                hc = np.array([(pt.x, pt.y, pt.z) for pt in hl], dtype=np.float32)
+                self._last_hand_landmarks.append(hc)
+                # Check if wrist (lm 0) is near nose tip (face lm 1)
+                if len(coords) > 1:
+                    wrist = hc[0]
+                    nose = coords[1]
+                    dist = float(np.linalg.norm(wrist[:2] - nose[:2]))
+                    if dist < 0.25:  # ~25% of frame width → hand near face
+                        self._hand_near_face = True
+        else:
+            self._last_hand_landmarks = []
+            self._hand_near_face = False
 
         # --- head pose: matrix-based (primary) or heuristic (fallback) ---
         if (

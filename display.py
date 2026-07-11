@@ -151,6 +151,20 @@ class FrameDisplay:
                         px, py = int(lm[idx][0] * w_frame), int(lm[idx][1] * h_frame)
                         cv2.circle(rgb, (px, py), 2, (0, 255, 128), -1)
 
+            # Draw hand landmarks if available
+            if debug and debug.get("hand_landmarks"):
+                h_frame, w_frame = cam_frame.shape[:2]
+                for hand in debug["hand_landmarks"]:
+                    for pt in hand:
+                        px, py = int(pt[0] * w_frame), int(pt[1] * h_frame)
+                        cv2.circle(rgb, (px, py), 2, (255, 128, 0), -1)
+                    # Draw hand connections (simplified)
+                    for a, b in [(0,5),(5,9),(9,13),(13,17),(0,17)]:
+                        if a < len(hand) and b < len(hand):
+                            pa = (int(hand[a][0]*w_frame), int(hand[a][1]*h_frame))
+                            pb = (int(hand[b][0]*w_frame), int(hand[b][1]*h_frame))
+                            cv2.line(rgb, pa, pb, (255, 160, 60), 1)
+
             surf = pygame.image.frombuffer(
                 rgb.tobytes(), (rgb.shape[1], rgb.shape[0]), "RGB"
             )

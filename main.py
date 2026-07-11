@@ -93,16 +93,16 @@ def main() -> None:
             # ---- dual-mode: CAM vs SIM ----
             confidence = tracking_state.face_confidence
 
-            # ---- auto hand_on_face (mouth_raw spike → hand near face) ----
+            # ---- auto hand_on_face (hand landmarker detection) ----
             if hof_cooldown > 0:
                 hof_cooldown -= 1
-            if tracking_state.mouth_raw > 0.30:
+            if tracker.hand_near_face:
                 hof_counter += 1
                 if hof_counter >= 5 and hof_cooldown <= 0:
                     if mapper.theme == config.THEME_DEFAULT:
                         mapper.theme = config.THEME_HAND_ON_FACE
                         print("[Theme] hand_on_face (auto)")
-                        hof_cooldown = 60  # 2s cooldown
+                        hof_cooldown = 60
             else:
                 hof_counter = max(0, hof_counter - 1)
                 if hof_counter <= 0 and mapper.theme == config.THEME_HAND_ON_FACE:
@@ -135,11 +135,9 @@ def main() -> None:
                 mouth_sim.reset()
 
             # ---- mapping ----
-            mapper.theme = (
-                config.THEME_DEFAULT
-                if leaving_state == "default"
-                else leaving_state
-            )
+            if leaving_state != "default":
+                mapper.theme = leaving_state
+            # else: keep whatever theme was set by auto-detection / manual toggle
             target_discrete_state = mapper.classify(tracking_state)
             target_state_key, target_frame_path = mapper.resolve_frame(
                 target_discrete_state
@@ -178,6 +176,7 @@ def main() -> None:
             debug = {
                 "camera_frame": tracker.last_frame,
                 "landmarks": tracker.last_landmarks,
+                "hand_landmarks": tracker.last_hand_landmarks,
                 "state_key": next_state_key,
                 "head": target_discrete_state.head,
                 "mouth": target_discrete_state.mouth,
