@@ -70,7 +70,7 @@ HEAD_ROLL_INNER_ONLY = True   # only apply roll to inner 3×3 (extreme angles hu
 
 # Micro‑variations per head key (for visual freshness).
 # Set to 1 to disable.  Frame naming:  open_open_R1_v3.png
-HEAD_VARIANTS_PER_KEY = 5
+HEAD_VARIANTS_PER_KEY = 1  # 关闭微差分（每个头姿只画一版）
 
 # Hysteresis margins for eye/mouth state transitions.
 # The signal must cross threshold ± margin to change state, preventing
