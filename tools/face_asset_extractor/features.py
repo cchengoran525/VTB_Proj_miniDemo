@@ -18,12 +18,16 @@ FEATURE_NAMES = [
     "eye_offset_x",       # eye midpoint offset from face centre, / w
     "eye_offset_y",       # eye midpoint offset from face centre, / h
     "eye_width_asym",     # min/max eye blob width (profile → far eye shrinks)
-    # eye state
-    "eye_dark_ratio",     # dark pixel ratio in both eye regions
-    "eye_lum",            # mean luminance of eye regions (open = whiter)
+    # eye state (tight per-eye crops — the old one-big-box features were
+    # polluted by brows/hair/highlights and could not separate open/closed)
+    "eye_dark_ratio",     # dark (iris/lash) ratio inside per-eye crops
+    "eye_blob_aspect",    # largest dark blob h/w — tall iris vs flat closed lid
+    "eye_lum",            # mean luminance of eye crops
     # mouth state
-    "mouth_dark_ratio",   # dark pixel ratio in mouth region
-    "mouth_aspect",       # mouth blob h/w
+    "mouth_dark_ratio",   # dark ratio in mouth crop
+    "mouth_red_ratio",    # saturated warm ratio — open mouth interior
+    "mouth_blob_aspect",  # dark blob h/w — open mouth is tall, closed is a line
+    "mouth_aspect",       # mouth blob h/w (legacy)
     # global scale (for forward/backward later)
     "char_area_ratio",    # silhouette area / frame area
 ]
@@ -66,26 +70,36 @@ def extract_features(
         feats["eye_offset_y"] = 0.0
         feats["eye_width_asym"] = 0.0
 
-    # --- eye state: box centred on the eye midpoint ---
+    # --- eye state: tight per-eye crops (bw≈0.22 face-w, bh≈0.16 face-h) ---
     if det.left_eye and det.right_eye:
-        ecx = (det.left_eye[0] + det.right_eye[0]) / 2
-        ecy = (det.left_eye[1] + det.right_eye[1]) / 2
-        eye_feats = _box_stats(gray, dark, ecx, ecy, fw * 0.60, fh * 0.30)
+        eye_boxes = [det.left_eye, det.right_eye]
     else:
-        eye_feats = _box_stats(gray, dark, fx + fw / 2, fy + fh * 0.45, fw * 0.60, fh * 0.30)
-    feats["eye_dark_ratio"] = eye_feats["dark_ratio"]
-    feats["eye_lum"] = eye_feats["lum"]
+        eye_boxes = [(fx + fw / 2, fy + fh * 0.45)]
+    ratios, whites, aspects, lums = [], [], [], []
+    for ex, ey in eye_boxes:
+        st = _crop_stats(gray, dark, mask, ex, ey, fw * 0.22, fh * 0.16)
+        ratios.append(st["dark_ratio"])
+        whites.append(st["white_ratio"])
+        aspects.append(st["blob_aspect"])
+        lums.append(st["lum"])
+    feats["eye_dark_ratio"] = float(np.mean(ratios))
+    feats["eye_white_ratio"] = float(np.mean(whites))
+    feats["eye_blob_aspect"] = float(np.mean(aspects))
+    feats["eye_lum"] = float(np.mean(lums))
 
-    # --- mouth state: box centred on mouth (fallback: below nose) ---
+    # --- mouth state: crop centred on mouth (fallback: below nose) ---
     if det.mouth:
         mcx, mcy = det.mouth
     elif det.nose:
         mcx, mcy = det.nose[0], det.nose[1] + fh * 0.30
     else:
         mcx, mcy = fx + fw / 2, fy + fh * 0.80
-    mouth_feats = _box_stats(gray, dark, mcx, mcy, fw * 0.45, fh * 0.28)
-    feats["mouth_dark_ratio"] = mouth_feats["dark_ratio"]
-    feats["mouth_aspect"] = mouth_feats["aspect"]
+    mst = _crop_stats(gray, dark, mask, mcx, mcy, fw * 0.34, fh * 0.20,
+                      red=True, bgr=bgr)
+    feats["mouth_dark_ratio"] = mst["dark_ratio"]
+    feats["mouth_red_ratio"] = mst["red_ratio"]
+    feats["mouth_blob_aspect"] = mst["blob_aspect"]
+    feats["mouth_aspect"] = mst["aspect"]
 
     # --- global scale ---
     feats["char_area_ratio"] = float(mask.sum()) / (h * w)
@@ -110,35 +124,51 @@ def _blob_width(dark: np.ndarray, center: tuple[int, int], radius: int) -> float
     return float(cols[-1] - cols[0] + 1)
 
 
-def _box_stats(
+def _crop_stats(
     gray: np.ndarray,
     dark: np.ndarray,
+    mask: np.ndarray,
     cx: float, cy: float,
     bw: float, bh: float,
+    red: bool = False,
+    bgr: np.ndarray | None = None,
 ) -> dict[str, float]:
-    """Stats of a small box centred at (cx, cy) — avoids hair pollution."""
+    """Stats inside a small character-masked crop — avoids hair/bg pollution."""
     h, w = gray.shape
     x0 = max(0, int(cx - bw / 2))
     x1 = min(w, int(cx + bw / 2))
     y0 = max(0, int(cy - bh / 2))
     y1 = min(h, int(cy + bh / 2))
     if x1 <= x0 or y1 <= y0:
-        return {"dark_ratio": 0.0, "lum": 1.0, "aspect": 0.0}
+        return {"dark_ratio": 0.0, "white_ratio": 0.0, "red_ratio": 0.0,
+                "lum": 1.0, "aspect": 0.0, "blob_aspect": 0.0}
 
+    m = mask[y0:y1, x0:x1] > 0
     sub_dark = dark[y0:y1, x0:x1]
     sub_gray = gray[y0:y1, x0:x1]
 
-    total = max(1, sub_dark.size)
-    dark_ratio = float(sub_dark.sum()) / total
-    lum = float(sub_gray.mean()) / 255.0 if sub_gray.size else 1.0
+    total = max(1, int(m.sum()))
+    dark_ratio = float(sub_dark[m].sum()) / total
+    white_ratio = float(((sub_gray > 185) & m).sum()) / total
+    lum = float(sub_gray[m].mean()) / 255.0 if m.any() else 1.0
 
-    # aspect of the largest dark blob in this box
+    red_ratio = 0.0
+    if red and bgr is not None:
+        sub_bgr = bgr[y0:y1, x0:x1].astype(np.int16)
+        warm = ((sub_bgr[:, :, 2] - sub_bgr[:, :, 0]) > 45) & m
+        red_ratio = float(warm.sum()) / total
+
+    # largest dark blob geometry inside the crop
     n, _, stats, _ = cv2.connectedComponentsWithStats(sub_dark, 8)
     aspect = 0.0
+    blob_aspect = 0.0
     best_area = 0
     for i in range(1, n):
         _, _, bw2, bh2, area = stats[i]
         if area > best_area:
             best_area = area
             aspect = bh2 / max(bw2, 1)
-    return {"dark_ratio": dark_ratio, "lum": lum, "aspect": aspect}
+            blob_aspect = aspect
+    return {"dark_ratio": dark_ratio, "white_ratio": white_ratio,
+            "red_ratio": red_ratio, "lum": lum, "aspect": aspect,
+            "blob_aspect": blob_aspect}

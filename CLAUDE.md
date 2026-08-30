@@ -30,6 +30,10 @@ A single-threaded 2D VTuber pipeline: **camera → CV perception → discrete st
 4. `Display.choose_next_frame()` picks the actual frame to render using a three-tier priority: (a) random hard-cut if the timer fired, (b) one-frame transition frame `{old_key}_to_{new_key}.png` if available, (c) direct hard-cut otherwise.
 5. `Display.render()` draws the chosen PNG centered on a pygame surface at 30fps.
 
+### Special states (themes, `main.py`)
+
+Every frame the theme is resolved by priority: `leaving` (face lost > 2s) > `returning` (face back, held 2s) > `drinking` (hand/cup at mouth zone) > `hand_on_face` (hand inside expanded face bbox; also `H`-key manual override) > `lean_forward` (face bbox height ≥ 118% of calibration baseline). Raw detections come from `FaceTracker` (`hand_on_face`, `hand_at_mouth`, `face_scale`) and are debounced by `Debounced` (frame-count Schmitt trigger). Region geometry (`_analyze_hand_face` in `tracker.py`) is a pure static method so it can be tested without a camera. Each theme maps to a `frames_placeholder/{theme}/` directory.
+
 ### Module responsibilities
 
 - **`config.py`** — All tunable constants: thresholds, Kalman noise, feature normalization ranges, random-cut interval window.

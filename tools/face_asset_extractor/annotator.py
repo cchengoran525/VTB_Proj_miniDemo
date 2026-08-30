@@ -1,7 +1,7 @@
 """Interactive annotation UI (pygame) — label candidate frames.
 
 Keyboard:
-  朝向:  1=center  2=L1  3=L2  4=R1  5=R2  6=U1  7=D1
+  朝向:  1=center  2=L1  3=L2  4=R1  5=R2  6=U1  7=D1  E=L3(侧面)  R=R3(侧面)
   眼睛:  A=open    S=half   D=closed
   嘴巴:  Z=closed  X=half   C=open
   导航:  ←/→ 前后帧     N 下一个未标注     P 上一个未标注
@@ -20,15 +20,18 @@ import pygame
 
 from face_detect import FaceDetection
 
-HEAD_LABELS = ["center", "L1", "L2", "R1", "R2", "U1", "D1"]
+HEAD_LABELS = ["center", "L1", "L2", "L3", "R1", "R2", "R3", "U1", "D1"]
 HEAD_KEYS = {
     pygame.K_1: "center", pygame.K_2: "L1", pygame.K_3: "L2",
     pygame.K_4: "R1", pygame.K_5: "R2", pygame.K_6: "U1", pygame.K_7: "D1",
+    pygame.K_e: "L3", pygame.K_r: "R3",   # 极端档: 完全侧面
 }
 EYE_LABELS = ["open", "half", "closed"]
 EYE_KEYS = {pygame.K_a: "open", pygame.K_s: "half", pygame.K_d: "closed"}
-MOUTH_LABELS = ["closed", "half", "open"]
-MOUTH_KEYS = {pygame.K_z: "closed", pygame.K_x: "half", pygame.K_c: "open"}
+MOUTH_LABELS = ["closed", "half", "open"]   # display layer stays 3-state;
+MOUTH_KEYS = {pygame.K_z: "closed",         # video extraction may just use
+              pygame.K_x: "half",           # closed/open — nearest-neighbour
+              pygame.K_c: "open"}           # fills half until hand-drawn diffs land
 
 
 class Annotator:
@@ -176,7 +179,7 @@ class Annotator:
             f"Frame: {fid}  ({self.idx + 1}/{len(self.candidates)})",
             f"Budget: {self.saved_count}/{self.budget}",
             "",
-            "HEAD  [1-7]:",
+            "HEAD  [1-7, E=L3, R=R3]:",
             *[f"  {'>>' if ann.get('head') == h else '  '} {h}  "
               f"{'[' + pre.get('head','') + ']' if pre.get('head') else ''}"
               for h in HEAD_LABELS],

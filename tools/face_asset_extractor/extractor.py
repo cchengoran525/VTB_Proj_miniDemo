@@ -226,8 +226,14 @@ def cmd_export(args) -> None:
     meta = load_meta(workdir)
     frames = load_frames(workdir, meta)
     classifications = json.loads((workdir / "classifications.json").read_text())
+    feats_path = workdir / "features.json"
+    features = (
+        json.loads(feats_path.read_text()) if feats_path.exists() else None
+    )
 
-    counts = exporter_mod.export(workdir, Path(args.out), frames, classifications)
+    counts = exporter_mod.export(
+        workdir, Path(args.out), frames, classifications, features
+    )
     total = sum(counts.values())
     print(f"Exported {total} PNGs → {args.out}")
     for theme, n in counts.items():

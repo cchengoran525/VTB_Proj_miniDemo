@@ -165,6 +165,23 @@ class FrameDisplay:
                             pb = (int(hand[b][0]*w_frame), int(hand[b][1]*h_frame))
                             cv2.line(rgb, pa, pb, (255, 160, 60), 1)
 
+            # Draw hand-face detection zones: expanded face box + mouth zone
+            if debug:
+                h_frame, w_frame = cam_frame.shape[:2]
+                for key, colour in (
+                    ("face_box", (0, 255, 0)),
+                    ("mouth_zone", (0, 200, 255)),
+                ):
+                    box = debug.get(key)
+                    if box:
+                        x0, x1, y0, y1 = box
+                        cv2.rectangle(
+                            rgb,
+                            (int(x0 * w_frame), int(y0 * h_frame)),
+                            (int(x1 * w_frame), int(y1 * h_frame)),
+                            colour, 1,
+                        )
+
             surf = pygame.image.frombuffer(
                 rgb.tobytes(), (rgb.shape[1], rgb.shape[0]), "RGB"
             )
@@ -198,6 +215,18 @@ class FrameDisplay:
                 lines.append(
                     f"Yaw: {debug['yaw_deg']:+.1f}°  "
                     f"Pitch: {debug['pitch_deg']:+.1f}°"
+                )
+            if debug.get("mouth_raw") is not None:
+                lines.append(f"Mouth raw: {debug['mouth_raw']:.3f}")
+            if debug.get("face_scale") is not None:
+                flags = (
+                    "DRINK" if debug.get("drinking")
+                    else "HOF" if debug.get("hand_on_face")
+                    else "LEAN" if debug.get("lean_forward")
+                    else "—"
+                )
+                lines.append(
+                    f"Scale: {debug['face_scale']:.2f}  Special: {flags}"
                 )
 
             for i, line in enumerate(lines):

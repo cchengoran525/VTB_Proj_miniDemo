@@ -11,7 +11,10 @@ def white_bg_matting(bgr: np.ndarray) -> np.ndarray:
     Extract the character from a white background.
 
     Steps:
-      1. Find near-white pixels (high luminance + low saturation).
+      1. Sample border pixels to learn the background's brightness/saturation,
+         then mark near-white pixels with an adaptive threshold.  The band is
+         tight enough that light-coloured clothing (usually 10+ value units
+         below the background) stays in the character mask.
       2. Flood-fill from the image borders — only background connected
          to the border is removed (keeps white costume/highlights inside).
       3. Morphological cleanup: open (kill specks) then close (fill holes).
@@ -20,10 +23,22 @@ def white_bg_matting(bgr: np.ndarray) -> np.ndarray:
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     h, w = bgr.shape[:2]
 
-    # Near-white: bright AND desaturated
+    # Learn background stats from the border ring
+    border = np.concatenate([
+        hsv[:5, :, :].reshape(-1, 3),
+        hsv[-5:, :, :].reshape(-1, 3),
+        hsv[:, :5, :].reshape(-1, 3),
+        hsv[:, -5:, :].reshape(-1, 3),
+    ]).astype(np.float32)
+    bg_value = float(np.median(border[:, 2]))
+    bg_sat = float(np.median(border[:, 1]))
+
+    # Near-white: within the adaptive band of the learned background.
     value = hsv[:, :, 2]
     sat = hsv[:, :, 1]
-    white_mask = ((value >= 235) & (sat <= 30)).astype(np.uint8)
+    v_lo = min(245.0, bg_value - 6.0)
+    s_hi = max(12.0, bg_sat + 10.0)
+    white_mask = ((value >= v_lo) & (sat <= s_hi)).astype(np.uint8)
 
     # Flood fill from borders (4-connected)
     fill = white_mask.copy()

@@ -49,6 +49,7 @@ class TrackingState:
     face_found: bool
     face_confidence: float = 0.0   # 0 = side profile, 1 = straight ahead
     mouth_raw: float = 0.0         # raw mouth height/width ratio (for occlusion)
+    face_scale: float = 1.0        # face bbox height vs calibrated baseline (lean)
 
     def as_vector(self) -> np.ndarray:
         return np.array(
@@ -121,7 +122,8 @@ class FaceTracker:
         base_process_noise = config.KALMAN_PROCESS_NOISE
         measurement_noise = config.KALMAN_MEASUREMENT_NOISE
         self.filters: Dict[str, Kalman1D] = {}
-        for key in ("pitch", "yaw", "roll", "mouth", "left_eye", "right_eye"):
+        for key in ("pitch", "yaw", "roll", "mouth", "left_eye", "right_eye",
+                    "face_size"):
             pn = base_process_noise * config.KALMAN_RESPONSIVENESS.get(key, 1.0)
             self.filters[key] = Kalman1D(pn, measurement_noise)
         self.last_state = TrackingState(
@@ -140,17 +142,26 @@ class FaceTracker:
         self._pitch_offset = 0.0
         self._yaw_offset = 0.0
         self._roll_offset = 0.0
+        self._face_size_baseline = 0.0   # neutral face bbox height (lean ref)
         self._calib_samples: Dict[str, List[float]] = {
-            "pitch": [], "yaw": [], "roll": [],
+            "pitch": [], "yaw": [], "roll": [], "face_size": [],
         }
 
         # Rolling history for occlusion detection (mouth / eye geometry)
         self._mouth_geo_history: List[float] = []
         self._eye_geo_history: List[float] = []
 
+        # Hand-face interaction results (region-based, see _analyze_hand_face)
+        self._hand_on_face: bool = False
+        self._hand_at_mouth: bool = False
+
         # Stored camera frame + landmarks for debug display
         self._last_frame: np.ndarray | None = None
         self._last_landmarks: np.ndarray | None = None
+
+        # Face bbox / mouth zone (normalized, for debug overlay)
+        self._face_box: tuple[float, float, float, float] | None = None
+        self._mouth_zone: tuple[float, float, float, float] | None = None
 
         # 用第一帧来"热身"模型，避免首帧卡顿
         ok, frame = self.cap.read()
@@ -159,6 +170,7 @@ class FaceTracker:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             self.face_landmarker.detect(mp_image)
+            self.hand_landmarker.detect(mp_image)
 
     @property
     def calibrated(self) -> bool:
@@ -180,9 +192,24 @@ class FaceTracker:
         return self._last_hand_landmarks
 
     @property
-    def hand_near_face(self) -> bool:
-        """True if any hand is near the face (wrist close to nose)."""
-        return self._hand_near_face
+    def hand_on_face(self) -> bool:
+        """Hand resting on / covering the face (cheek, chin, eye…)."""
+        return self._hand_on_face
+
+    @property
+    def hand_at_mouth(self) -> bool:
+        """Hand (or held object) in front of the mouth — drinking proxy."""
+        return self._hand_at_mouth
+
+    @property
+    def face_box(self) -> tuple[float, float, float, float] | None:
+        """Expanded face bbox (x0, x1, y0, y1) used by the on-face test."""
+        return self._face_box
+
+    @property
+    def mouth_zone(self) -> tuple[float, float, float, float] | None:
+        """Mouth zone box (x0, x1, y0, y1) used by the at-mouth test."""
+        return self._mouth_zone
 
     def close(self) -> None:
         self.cap.release()
@@ -201,6 +228,10 @@ class FaceTracker:
         result = self.face_landmarker.detect(mp_image)
 
         if not result.face_landmarks:
+            self._hand_on_face = False
+            self._hand_at_mouth = False
+            self._face_box = None
+            self._mouth_zone = None
             return TrackingState(
                 pitch=self.last_state.pitch,
                 yaw=self.last_state.yaw,
@@ -211,6 +242,7 @@ class FaceTracker:
                 face_found=False,
                 face_confidence=0.0,
                 mouth_raw=0.0,
+                face_scale=1.0,
             )
 
         # face_landmarks[0] 直接是 NormalizedLandmark 列表
@@ -218,24 +250,29 @@ class FaceTracker:
         coords = np.array([(pt.x, pt.y, pt.z) for pt in landmarks], dtype=np.float32)
         self._last_landmarks = coords.copy()  # store for debug overlay
 
-        # Hand detection
+        # Hand detection — region-based interaction analysis
+        # (撑脸: hand resting in the expanded face box; 喝水: hand/cup at mouth)
         hand_result = self.hand_landmarker.detect(mp_image)
-        self._last_hand_landmarks: list[np.ndarray] = []
-        self._hand_near_face: bool = False
+        self._last_hand_landmarks = []
+        self._hand_on_face = False
+        self._hand_at_mouth = False
+        self._face_box = None
+        self._mouth_zone = None
         if hand_result.hand_landmarks:
-            for hl in hand_result.hand_landmarks:
-                hc = np.array([(pt.x, pt.y, pt.z) for pt in hl], dtype=np.float32)
-                self._last_hand_landmarks.append(hc)
-                # Check if wrist (lm 0) is near nose tip (face lm 1)
-                if len(coords) > 1:
-                    wrist = hc[0]
-                    nose = coords[1]
-                    dist = float(np.linalg.norm(wrist[:2] - nose[:2]))
-                    if dist < 0.25:  # ~25% of frame width → hand near face
-                        self._hand_near_face = True
-        else:
-            self._last_hand_landmarks = []
-            self._hand_near_face = False
+            hands = [
+                np.array([(pt.x, pt.y, pt.z) for pt in hl], dtype=np.float32)
+                for hl in hand_result.hand_landmarks
+            ]
+            self._last_hand_landmarks = hands
+            self._hand_on_face, self._hand_at_mouth, self._face_box, \
+                self._mouth_zone = self._analyze_hand_face(hands, coords)
+
+        # Face bbox size (normalized coords) — drives confidence and lean
+        xs = coords[:, 0]
+        ys = coords[:, 1]
+        face_w = float(np.ptp(xs))
+        face_h = float(np.ptp(ys))
+        face_size_filtered = self.filters["face_size"].update(face_h)
 
         # --- head pose: matrix-based (primary) or heuristic (fallback) ---
         if (
@@ -248,9 +285,11 @@ class FaceTracker:
         else:
             pitch_raw, yaw_raw, roll_raw = self._head_pose(coords)
 
-        # --- calibration: zero out neutral pose ---
+        # --- calibration: zero out neutral pose + capture face-size baseline ---
         if not self._calibrated:
-            pitch, yaw, roll = self._collect_calibration(pitch_raw, yaw_raw, roll_raw)
+            pitch, yaw, roll = self._collect_calibration(
+                pitch_raw, yaw_raw, roll_raw, face_h
+            )
         else:
             pitch = pitch_raw - self._pitch_offset
             yaw = yaw_raw - self._yaw_offset
@@ -267,10 +306,6 @@ class FaceTracker:
         rot_conf = max(0.0, 1.0 - math.hypot(pitch, yaw) / 0.52)
         #
         # (2) Aspect-ratio confidence — face bounding-box width/height ratio.
-        xs = coords[:, 0]
-        ys = coords[:, 1]
-        face_w = float(np.ptp(xs))
-        face_h = float(np.ptp(ys))
         ar = face_w / (face_h + 1e-6)
         ar_conf = float(np.clip((ar - 0.30) / 0.50, 0.0, 1.0))
         #
@@ -313,6 +348,10 @@ class FaceTracker:
                 0.35 * rot_conf + 0.35 * ar_conf + 0.30 * eye_conf
             )
 
+        face_scale = 1.0
+        if self._calibrated and self._face_size_baseline > 1e-4:
+            face_scale = face_size_filtered / self._face_size_baseline
+
         state = TrackingState(
             pitch=self.filters["pitch"].update(pitch),
             yaw=self.filters["yaw"].update(yaw),
@@ -329,6 +368,7 @@ class FaceTracker:
             face_found=True,
             face_confidence=float(confidence),
             mouth_raw=float(mouth_raw),
+            face_scale=float(face_scale),
         )
         self.last_state = state
         return state
@@ -365,23 +405,89 @@ class FaceTracker:
         rx, ry, rz = rvec.flatten()
         return float(rx), float(ry), float(rz)
 
+    # ------------------------------------------------------------------
+    #  Hand-face interaction (region test, no camera needed → testable)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _analyze_hand_face(
+        hands: List[np.ndarray], face: np.ndarray
+    ) -> tuple[bool, bool, tuple[float, float, float, float],
+               tuple[float, float, float, float]]:
+        """
+        Decide (hand_on_face, hand_at_mouth) from normalized landmarks.
+
+        - on-face: ≥ HAND_ON_FACE_MIN_POINTS hand keypoints inside the face
+          bbox expanded by HAND_FACE_MARGIN_{X,Y} — catches cheek-rest,
+          chin-rest and eye-rub where the wrist itself is far away.
+        - at-mouth: ≥ DRINK_MIN_POINTS keypoints inside a narrow zone centred
+          on the mouth (sized in face units) — drinking/cup proxy.
+
+        Also returns the two zone boxes (x0, x1, y0, y1) for debug overlay.
+        """
+        xs = face[:, 0]
+        ys = face[:, 1]
+        fx0, fx1 = float(xs.min()), float(xs.max())
+        fy0, fy1 = float(ys.min()), float(ys.max())
+        fw = fx1 - fx0
+        fh = fy1 - fy0
+
+        face_box = (
+            fx0 - config.HAND_FACE_MARGIN_X * fw,
+            fx1 + config.HAND_FACE_MARGIN_X * fw,
+            fy0 - config.HAND_FACE_MARGIN_Y * fh,
+            fy1 + config.HAND_FACE_MARGIN_Y * fh,
+        )
+        mouth_c = (face[13, :2] + face[14, :2]) / 2.0
+        mouth_zone = (
+            mouth_c[0] - config.DRINK_MOUTH_HALF_W * fw,
+            mouth_c[0] + config.DRINK_MOUTH_HALF_W * fw,
+            mouth_c[1] - config.DRINK_MOUTH_HALF_H * fh,
+            mouth_c[1] + config.DRINK_MOUTH_HALF_H * fh,
+        )
+
+        on_face = False
+        at_mouth = False
+        for hand in hands:
+            pts = hand[list(config.HAND_CHECK_INDICES), :2]
+            in_face_box = (
+                (pts[:, 0] > face_box[0]) & (pts[:, 0] < face_box[1])
+                & (pts[:, 1] > face_box[2]) & (pts[:, 1] < face_box[3])
+            )
+            if int(in_face_box.sum()) >= config.HAND_ON_FACE_MIN_POINTS:
+                on_face = True
+            in_mouth_zone = (
+                (pts[:, 0] > mouth_zone[0]) & (pts[:, 0] < mouth_zone[1])
+                & (pts[:, 1] > mouth_zone[2]) & (pts[:, 1] < mouth_zone[3])
+            )
+            if int(in_mouth_zone.sum()) >= config.DRINK_MIN_POINTS:
+                at_mouth = True
+            if on_face and at_mouth:
+                break
+        return on_face, at_mouth, face_box, mouth_zone
+
     def _collect_calibration(
-        self, pitch: float, yaw: float, roll: float
+        self, pitch: float, yaw: float, roll: float, face_size: float
     ) -> tuple[float, float, float]:
         """Accumulate neutral-pose samples; finalise when enough collected."""
         self._calib_samples["pitch"].append(pitch)
         self._calib_samples["yaw"].append(yaw)
         self._calib_samples["roll"].append(roll)
+        self._calib_samples["face_size"].append(face_size)
 
         if len(self._calib_samples["pitch"]) >= config.CALIBRATION_FRAMES:
             self._pitch_offset = float(np.mean(self._calib_samples["pitch"]))
             self._yaw_offset = float(np.mean(self._calib_samples["yaw"]))
             self._roll_offset = float(np.mean(self._calib_samples["roll"]))
+            self._face_size_baseline = float(
+                np.mean(self._calib_samples["face_size"])
+            )
             self._calibrated = True
             print(
                 f"[Calibrated] pitch_offset={math.degrees(self._pitch_offset):.1f}°  "
                 f"yaw_offset={math.degrees(self._yaw_offset):.1f}°  "
-                f"roll_offset={math.degrees(self._roll_offset):.1f}°"
+                f"roll_offset={math.degrees(self._roll_offset):.1f}°  "
+                f"face_size={self._face_size_baseline:.3f}"
             )
             return (
                 pitch - self._pitch_offset,
@@ -427,14 +533,21 @@ class FaceTracker:
         left_idx: int,
         right_idx: int,
     ) -> float:
+        """Eye openness — height vs FACE height.
+
+        The old eye_width denominator collapsed as the head yaws, inflating
+        the ratio and faking 'open' at extreme angles.  Vertical distances
+        are preserved under yaw, so face height is a stable reference.
+        """
         eye_height = self._dist(points, top_idx, bottom_idx)
-        eye_width = self._dist(points, left_idx, right_idx)
-        return eye_height / (eye_width + 1e-6)
+        face_height = self._dist(points, FOREHEAD, CHIN)
+        return eye_height / (face_height + 1e-6)
 
     def _mouth_ratio(self, points: np.ndarray) -> float:
+        """Mouth openness — height vs FACE height (yaw-invariant, see above)."""
         mouth_height = self._dist(points, MOUTH_TOP, MOUTH_BOTTOM)
-        mouth_width = self._dist(points, MOUTH_LEFT, MOUTH_RIGHT)
-        return mouth_height / (mouth_width + 1e-6)
+        face_height = self._dist(points, FOREHEAD, CHIN)
+        return mouth_height / (face_height + 1e-6)
 
     def _head_pose(self, points: np.ndarray) -> tuple[float, float, float]:
         face_height = self._dist(points, FOREHEAD, CHIN)

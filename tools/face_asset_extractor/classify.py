@@ -14,12 +14,16 @@ import numpy as np
 
 from features import FEATURE_NAMES
 
+# Single standardized feature space shared by all three fields.
+# Ablated against per-field subsets (LOO on the seed annotations):
+# subsets dropped useful cross-signal; the shared space scored best overall.
+FIELD_FEATURES = {f: FEATURE_NAMES for f in ("head", "eye", "mouth")}
+
 
 class StateClassifier:
     def __init__(self) -> None:
         self.centroids: dict[str, dict[str, np.ndarray]] = {}
-        self.means: np.ndarray | None = None
-        self.stds: np.ndarray | None = None
+        self.stats: dict[str, tuple[np.ndarray, np.ndarray]] = {}  # field → (mean, std)
 
     # ------------------------------------------------------------------
 
@@ -29,51 +33,54 @@ class StateClassifier:
         annotations: dict[str, dict],
     ) -> None:
         """Learn per-class centroids from annotated examples."""
-        x: list[np.ndarray] = []
-        y_head: list[str] = []
-        y_eye: list[str] = []
-        y_mouth: list[str] = []
+        x_all: list[np.ndarray] = []
+        ids: list[str] = []
+        y: dict[str, list[str]] = {"head": [], "eye": [], "mouth": []}
 
         for fid, ann in annotations.items():
             feat = features.get(fid)
             if feat is None:
                 continue
-            x.append(np.array([feat[n] for n in FEATURE_NAMES]))
-            y_head.append(ann.get("head", ""))
-            y_eye.append(ann.get("eye", ""))
-            y_mouth.append(ann.get("mouth", ""))
+            x_all.append(np.array([feat[n] for n in FEATURE_NAMES]))
+            ids.append(fid)
+            for field in y:
+                y[field].append(ann.get(field, ""))
 
-        if not x:
+        if not x_all:
             raise ValueError("No annotated examples with features found")
 
-        X = np.vstack(x)
-        self.means = X.mean(axis=0)
-        self.stds = X.std(axis=0) + 1e-6
-        Xz = (X - self.means) / self.stds
+        X_all = np.vstack(x_all)
+        col = {name: i for i, name in enumerate(FEATURE_NAMES)}
 
-        for field, labels in [
-            ("head", y_head), ("eye", y_eye), ("mouth", y_mouth),
-        ]:
+        for field, labels in y.items():
+            names = FIELD_FEATURES[field]
+            X = X_all[:, [col[n] for n in names]]
+            mean = X.mean(axis=0)
+            std = X.std(axis=0) + 1e-6
+            Xz = (X - mean) / std
+            self.stats[field] = (mean, std)
+
             centroids: dict[str, np.ndarray] = {}
             for lab in set(labels):
                 if not lab:
                     continue
-                centroids[lab] = Xz[[i for i, y in enumerate(labels) if y == lab]].mean(axis=0)
+                centroids[lab] = Xz[[i for i, v in enumerate(labels) if v == lab]].mean(axis=0)
             self.centroids[field] = centroids
 
     # ------------------------------------------------------------------
 
-    def predict(
-        self, feat: dict[str, float]
-    ) -> dict[str, tuple[str, float]]:
+    def predict(self, feat: dict[str, float]) -> dict[str, tuple[str, float]]:
         """Predict (label, confidence) for head / eye / mouth."""
-        if self.means is None:
+        if not self.stats:
             raise RuntimeError("Classifier not fitted yet")
-        x = np.array([feat[n] for n in FEATURE_NAMES])
-        z = (x - self.means) / self.stds
+        vec = {n: feat.get(n, 0.0) for n in FEATURE_NAMES}
 
         out: dict[str, tuple[str, float]] = {}
         for field, cent in self.centroids.items():
+            mean, std = self.stats[field]
+            names = FIELD_FEATURES[field]
+            z = (np.array([vec[n] for n in names]) - mean) / std
+
             best_lab, best_d = "", float("inf")
             second_d = float("inf")
             for lab, c in cent.items():
@@ -83,8 +90,9 @@ class StateClassifier:
                     best_d, best_lab = d, lab
                 elif d < second_d:
                     second_d = d
-            # confidence = margin ratio (1 = far from other classes)
-            conf = 1.0 - best_d / (best_d + second_d + 1e-9)
+            # Margin between best and second-best class distance.
+            # 0 = ambiguous (both classes equally near), →1 = clear winner.
+            conf = (second_d - best_d) / (second_d + best_d + 1e-9)
             out[field] = (best_lab, conf)
         return out
 
@@ -96,8 +104,9 @@ class StateClassifier:
                 f: {lab: c.tolist() for lab, c in cs.items()}
                 for f, cs in self.centroids.items()
             },
-            "means": self.means.tolist() if self.means is not None else None,
-            "stds": self.stds.tolist() if self.stds is not None else None,
+            "stats": {
+                f: (m.tolist(), s.tolist()) for f, (m, s) in self.stats.items()
+            },
         }, indent=1))
 
     def load(self, path: Path) -> bool:
@@ -108,6 +117,8 @@ class StateClassifier:
             f: {lab: np.array(c) for lab, c in cs.items()}
             for f, cs in data["centroids"].items()
         }
-        self.means = np.array(data["means"]) if data["means"] else None
-        self.stds = np.array(data["stds"]) if data["stds"] else None
+        self.stats = {
+            f: (np.array(m), np.array(s))
+            for f, (m, s) in data["stats"].items()
+        }
         return True

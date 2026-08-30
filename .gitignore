@@ -6,3 +6,7 @@ __pycache__/
 models/
 frames_placeholder/
 frames_test/
+tools/face_asset_extractor/input_videos/
+tools/face_asset_extractor/work/
+tools/face_asset_extractor/output/
+video/
